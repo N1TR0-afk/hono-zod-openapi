@@ -3,7 +3,7 @@ import type { MiddlewareHandler, TypedResponse } from 'hono';
 import { describe, expect, it } from 'vitest';
 import * as z from 'zod';
 import { createOpenApiDocument } from './createOpenApiDocument.ts';
-import { openApi } from './openApi.ts';
+import { createOpenApiFragment, openApi } from './openApi.ts';
 
 interface AppBindings {
   SESSIONS: Map<string, string>;
@@ -336,6 +336,149 @@ describe('openApi with reusable middleware', () => {
       ]?.content?.['application/json'],
     ).toBeDefined();
 
+    expect(post?.requestBody && 'content' in post.requestBody).toBe(true);
+  });
+});
+
+describe('createOpenApiFragment', () => {
+  type FragmentEnv = {
+    Bindings: { SESSIONS: Map<string, string> };
+    Variables: { userId: string };
+  };
+
+  const openApiFragment = createOpenApiFragment<FragmentEnv>();
+  const fragmentSessions = new Map([['valid-token', 'user-1']]);
+
+  const fragmentAuth = openApiFragment(
+    {
+      responses: {
+        401: { schema: z.object({ message: z.string() }) },
+      },
+      request: {
+        header: z.object({ Authorization: z.string() }),
+      },
+    },
+    async (c, next) => {
+      const userId = await c.env.SESSIONS.get(
+        c.req.valid('header').Authorization,
+      );
+      if (!userId) {
+        return c.var.res(401, { message: 'Unauthorized' });
+      }
+      c.set('userId', userId);
+      await next();
+    },
+  );
+
+  it('inline middleware reads validated input, bindings and returns schema-checked responses', async () => {
+    const app = new Hono<FragmentEnv>().post(
+      '/user',
+      fragmentAuth,
+      openApiFragment({
+        responses: {
+          200: z.object({ userId: z.string() }),
+        },
+        request: {
+          json: z.object({ name: z.string() }),
+        },
+      }),
+      async (c) => c.var.res(200, { userId: c.var.userId }),
+    );
+
+    const ok = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'valid-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John' }),
+      },
+      { SESSIONS: fragmentSessions } satisfies FragmentEnv['Bindings'],
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ userId: 'user-1' });
+
+    const denied = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'missing-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John' }),
+      },
+      { SESSIONS: fragmentSessions } satisfies FragmentEnv['Bindings'],
+    );
+    expect(denied.status).toBe(401);
+    expect(await denied.json()).toEqual({ message: 'Unauthorized' });
+  });
+
+  it('fragment middleware still validates its own request part', async () => {
+    const app = new Hono<FragmentEnv>().post(
+      '/user',
+      fragmentAuth,
+      openApiFragment({
+        responses: {
+          200: z.object({ userId: z.string() }),
+        },
+        request: {
+          json: z.object({ name: z.string() }),
+        },
+      }),
+      async (c) => c.var.res(200, { userId: c.var.userId }),
+    );
+
+    const response = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'John' }),
+      },
+      { SESSIONS: fragmentSessions } satisfies FragmentEnv['Bindings'],
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it('openApi document is generated for fragment routes', () => {
+    const app = new Hono<FragmentEnv>().post(
+      '/user',
+      openApiFragment(
+        {
+          responses: {
+            200: z.object({ userId: z.string() }),
+            401: {
+              schema: z.object({ code: z.string(), message: z.string() }),
+            },
+          },
+          request: {
+            json: z.object({ name: z.string() }),
+          },
+        },
+        async (c, next) => {
+          if (
+            !(await c.env.SESSIONS.get(c.req.header('Authorization') ?? ''))
+          ) {
+            return c.var.res(401, { code: 'UNAUTHORIZED', message: 'nope' });
+          }
+          await next();
+        },
+      ),
+      async (c) => c.var.res(200, { userId: c.var.userId }),
+    );
+
+    const document = createOpenApiDocument(app, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+
+    const post = document.paths?.['/user']?.post;
+    expect(Object.keys(post?.responses ?? {})).toEqual(
+      expect.arrayContaining(['200', '401']),
+    );
     expect(post?.requestBody && 'content' in post.requestBody).toBe(true);
   });
 });

@@ -3,9 +3,9 @@ import { createMiddleware } from 'hono/factory';
 import type { MiddlewareHandler, TypedResponse } from 'hono';
 import { hc } from 'hono/client';
 import type { InferRequestType } from 'hono/client';
-import { expectTypeOf, it } from 'vitest';
+import { describe, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
-import { openApi } from './openApi.ts';
+import { createOpenApiFragment, openApi } from './openApi.ts';
 
 interface AppBindings {
   SESSIONS: Map<string, string>;
@@ -210,4 +210,124 @@ it('handler env stays precise even with an env-mismatched middleware', () => {
     },
   );
   expectTypeOf(app).not.toBeUndefined();
+});
+
+describe('createOpenApiFragment', () => {
+  type FragmentEnv = {
+    Bindings: { SESSIONS: Map<string, string> };
+    Variables: { userId: string };
+  };
+  const openApiFragment = createOpenApiFragment<FragmentEnv>();
+
+  const fragmentRoutes = new Hono<FragmentEnv>()
+    .post(
+      '/user',
+      openApiFragment(
+        {
+          responses: {
+            200: z.object({ name: z.string() }),
+            401: { schema: z.object({ message: z.string() }) },
+          },
+          request: {
+            header: z.object({ Authorization: z.string() }),
+            json: z.object({ name: z.string() }),
+          },
+        },
+        // inline middleware — everything contextually typed, zero annotations
+        async (c, next) => {
+          expectTypeOf(c.env.SESSIONS).toEqualTypeOf<
+            FragmentEnv['Bindings']['SESSIONS']
+          >();
+          expectTypeOf(c.req.valid('header')).toEqualTypeOf<{
+            Authorization: string;
+          }>();
+          expectTypeOf(c.var.res(401, { message: 'no' })).toEqualTypeOf<
+            Response & TypedResponse<{ message: string }, 401, 'json'>
+          >();
+
+          // @ts-expect-error the middleware env is precise: unknown bindings are rejected
+          const _unknownBinding = c.env.NOT_A_REAL_BINDING;
+          // @ts-expect-error only declared request targets are accepted
+          const _invalidTarget = c.req.valid('query');
+          // @ts-expect-error wrong payload shape for the 401 response
+          c.var.res(401, { message: 123 });
+
+          if (
+            !(await c.env.SESSIONS.get(c.req.valid('header').Authorization))
+          ) {
+            return c.var.res(401, { message: 'Unauthorized' });
+          }
+          await next();
+        },
+      ),
+      async (c) => {
+        expectTypeOf(c.var.userId).toEqualTypeOf<string>();
+        return c.var.res(200, { name: 'John' });
+      },
+    )
+    .get(
+      '/plain',
+      openApiFragment({ responses: { 200: z.object({ a: z.string() }) } }),
+      (c) => c.var.res(200, { a: 'x' }),
+    );
+
+  it('incompatible environments are rejected at the fragment slot', () => {
+    const wrongEnv = createMiddleware<{ Bindings: { WRONG: true } }>(
+      async (c, next) => {
+        expectTypeOf(c.env.WRONG).toEqualTypeOf<true>();
+        await next();
+      },
+    );
+
+    const composed = openApiFragment(
+      { responses: { 200: z.object({}) } },
+      // @ts-expect-error incompatible middleware environments must be rejected
+      wrongEnv,
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+  });
+
+  it('fragment routes keep hc<AppType> inference (200 + middleware 401 + plain routes)', () => {
+    const client = hc<typeof fragmentRoutes>('/');
+    expectTypeOf<
+      InferRequestType<typeof client.user.$post>['json']
+    >().toEqualTypeOf<{
+      name: string;
+    }>();
+    const run = async () => {
+      const res = await client.user.$post({
+        json: { name: 'x' },
+        header: { Authorization: 't' },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+      }
+      const plain = await client.plain.$get();
+      if (plain.status === 200) {
+        expectTypeOf(await plain.json()).toEqualTypeOf<{ a: string }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('fragment arity-0 route keeps the seeded app env in the handler', () => {
+    const app = new Hono<FragmentEnv>().post(
+      '/zero',
+      openApiFragment({
+        responses: {
+          200: z.object({ ok: z.boolean() }),
+        },
+      }),
+      async (c) => {
+        expectTypeOf(c.env.SESSIONS).toEqualTypeOf<
+          FragmentEnv['Bindings']['SESSIONS']
+        >();
+        return c.json({ ok: true }, 200);
+      },
+    );
+    expectTypeOf(app).not.toBeUndefined();
+  });
 });

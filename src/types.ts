@@ -273,6 +273,161 @@ export interface HonoOpenApiMiddleware {
   >;
 }
 
+/**
+ * `TypedResponse` union implied by an operation's declared responses.
+ * Used as the default response type for middleware that do not declare their
+ * own, so early responses typed with the operation's schema surface in the
+ * Hono RPC client.
+ */
+type ExtractTypedMiddlewareResponseOnly<T> = T extends TypedResponse
+  ? T
+  : never;
+
+/* AnyMiddleware mirrors Hono's own middleware generics (default is `any`). */
+// oxlint-disable-next-line typescript/no-explicit-any
+type AnyMiddleware = MiddlewareHandler<any, any, any, any>;
+// oxlint-disable-next-line typescript/no-explicit-any
+type AnyTypedResponse = TypedResponse<any, any, any>;
+
+/**
+ * `TypedResponse` members a Hono middleware contributes to a route, mirroring
+ * Hono's internal `MergeMiddlewareResponse`.
+ */
+export type HonoMiddlewareTypedResponses<M extends AnyMiddleware> = M extends (
+  c: unknown,
+  next: unknown,
+) => Promise<infer R>
+  ? Exclude<R, void> extends never
+    ? never
+    : Exclude<R, void> extends Response | AnyTypedResponse
+      ? ExtractTypedMiddlewareResponseOnly<Exclude<R, void>>
+      : never
+  : M extends (c: unknown, next: unknown) => infer R
+    ? R extends Response | AnyTypedResponse
+      ? ExtractTypedMiddlewareResponseOnly<R>
+      : never
+    : never;
+
+export type OperationResponseTypes<Res extends HonoOpenApiResponses> =
+  keyof ResponseSchemas<Res> extends never
+    ? Response
+    : {
+        [S in keyof ResponseSchemas<Res>]: TypedResponse<
+          InferPayload<ResponseSchemas<Res>[S]>,
+          S & StatusCodeWithoutMinus1
+        >;
+      }[keyof ResponseSchemas<Res>];
+
+/**
+ * Call signatures of the creator returned by {@link createOpenApiFragment}.
+ *
+ * Every middleware slot carries the fragment's seeded environment (app
+ * bindings/variables intersected with the `res` helper environment) and the
+ * validated-input types derived from the operation, so middleware written
+ * inline get `c.env`, `c.req.valid()` and `c.var.res()` typed without extra
+ * annotations. Middleware annotated with their own environment are accepted as
+ * well when it is compatible with the seeded environment. Responses declared as
+ * `TypedResponse` by the passed middleware are merged into the route's Hono RPC
+ * client schema.
+ */
+/**
+ * Middleware shape accepted by a fragment: the fragment's seeded environment
+ * (route environment intersected with the `res` helper environment) and the
+ * operation's validated-input types.
+ */
+export type FragmentMiddlewareBase<
+  RouteEnv extends Env,
+  Res extends HonoOpenApiResponses,
+  P extends string,
+  Req extends HonoOpenApiRequestSchemas,
+> = MiddlewareHandler<
+  IntersectNonAnyTypes<[RouteEnv, HonoOpenApiMiddlewareEnv<Res>]>,
+  P,
+  Values<Req>
+>;
+
+export type FragmentEnv<
+  RouteEnv extends Env,
+  Res extends HonoOpenApiResponses,
+> = IntersectNonAnyTypes<[RouteEnv, HonoOpenApiMiddlewareEnv<Res>]>;
+
+export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+  ): MiddlewareHandler<
+    FragmentEnv<RouteEnv, Res>,
+    P,
+    Values<Req>,
+    OperationResponseTypes<Res>
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    middleware1: M1,
+  ): MiddlewareHandler<
+    FragmentEnv<RouteEnv, Res>,
+    P,
+    Values<Req>,
+    HonoMiddlewareTypedResponses<M1> | OperationResponseTypes<Res>
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+    M2 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    middleware1: M1,
+    middleware2: M2,
+  ): MiddlewareHandler<
+    FragmentEnv<RouteEnv, Res>,
+    P,
+    Values<Req>,
+    | HonoMiddlewareTypedResponses<M1>
+    | HonoMiddlewareTypedResponses<M2>
+    | OperationResponseTypes<Res>
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+    M2 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+    M3 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
+      FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    middleware1: M1,
+    middleware2: M2,
+    middleware3: M3,
+  ): MiddlewareHandler<
+    FragmentEnv<RouteEnv, Res>,
+    P,
+    Values<Req>,
+    | HonoMiddlewareTypedResponses<M1>
+    | HonoMiddlewareTypedResponses<M2>
+    | HonoMiddlewareTypedResponses<M3>
+    | OperationResponseTypes<Res>
+  >;
+}
+
 type ExtractResponseSchema<T> = T extends SimpleResponseObject
   ? T['schema']
   : T extends ZodOpenApiResponseObject

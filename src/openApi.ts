@@ -4,6 +4,7 @@ import type { MiddlewareHandler } from 'hono';
 import * as z from 'zod';
 import { typedResponseMiddleware } from './typedResponse.ts';
 import type {
+  HonoOpenApiFragmentMiddleware,
   HonoOpenApiMiddleware,
   HonoOpenApiMiddlewareEnv,
   HonoOpenApiOperation,
@@ -13,6 +14,7 @@ import type {
   Values,
   ZodValidatorFn,
 } from './types.ts';
+import type { Env } from 'hono';
 
 export const OpenApiSymbol = Symbol();
 
@@ -107,3 +109,82 @@ export const defineOpenApiOperation = <
 >(
   operation: HonoOpenApiOperation<Req, Res>,
 ) => operation;
+
+/**
+ * Creates a route-environment-aware variant of the `openApi` middleware.
+ *
+ * Middleware passed to the returned creator is typed with the route environment
+ * (`RouteEnv`), so middleware written inline get `c.env` (bindings), validated
+ * request data (`c.req.valid()`) and the typed-response helper (`c.var.res`)
+ * without extra annotations. Middleware annotated with their own environment
+ * (the reusable style) are accepted as well and their environment is
+ * intersected with the route environment, as with plain Hono middleware
+ * chaining.
+ *
+ * @example
+ * ```ts
+ * const openApi = createOpenApiFragment<AppEnv>();
+ *
+ * app.post(
+ *   '/user',
+ *   openApi(
+ *     {
+ *       responses: { 401: z.object({ message: z.string() }) },
+ *     },
+ *     async (c, next) => {
+ *       // `c.env`, `c.req.valid('json')` etc. are fully typed
+ *       await next();
+ *     },
+ *   ),
+ * );
+ * ```
+ */
+export function createOpenApiFragment<
+  RouteEnv extends Env = Env,
+>(): HonoOpenApiFragmentMiddleware<RouteEnv> {
+  return ((
+    operation: HonoOpenApiOperation<
+      HonoOpenApiRequestSchemas,
+      HonoOpenApiResponses
+    >,
+    ...middleware: unknown[]
+  ) => {
+    const { request } = operation;
+    const metadata = {
+      [OpenApiSymbol]: operation,
+    };
+
+    const resMiddleware = typedResponseMiddleware(operation);
+
+    if (!request) {
+      return Object.assign(
+        every(...(middleware as MiddlewareHandler[]), resMiddleware),
+        metadata,
+      );
+    }
+
+    const validators = Object.entries(request)
+      .map(([target, schemaOrParams]) => {
+        const schema =
+          schemaOrParams instanceof z.ZodType
+            ? schemaOrParams
+            : (schemaOrParams as { validate?: boolean; schema: z.ZodType })
+                  .validate !== false
+              ? (schemaOrParams as { schema: z.ZodType }).schema
+              : null;
+
+        if (!schema) return null;
+
+        return zValidator(target as ValidationTarget, schema as z.ZodType);
+      })
+      .filter((v) => !!v);
+
+    const composed = every(
+      ...validators,
+      resMiddleware,
+      ...(middleware as MiddlewareHandler[]),
+    );
+
+    return Object.assign(composed, metadata);
+  }) as unknown as ReturnType<typeof createOpenApiFragment<RouteEnv>>;
+}
