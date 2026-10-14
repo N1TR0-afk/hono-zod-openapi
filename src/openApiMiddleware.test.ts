@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import type { MiddlewareHandler, TypedResponse } from 'hono';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
 import { createOpenApiDocument } from './createOpenApiDocument.ts';
 import { createOpenApiFragment, openApi } from './openApi.ts';
@@ -480,5 +480,103 @@ describe('createOpenApiFragment', () => {
       expect.arrayContaining(['200', '401']),
     );
     expect(post?.requestBody && 'content' in post.requestBody).toBe(true);
+  });
+});
+
+describe('openApi fragment merging', () => {
+  it('nested fragment: operations merge into a single metadata (doc) payload', () => {
+    const jwtOpenApi = openApi({
+      security: [{ bearerAuth: [] }],
+      tags: ['Auth'],
+      request: {
+        header: z.object({ authorization: z.string() }),
+      },
+      responses: {
+        401: { schema: z.object({ message: z.string() }) },
+      },
+    });
+
+    const app = new Hono().get(
+      '/user',
+      openApi(
+        {
+          tags: ['User'],
+          responses: {
+            200: z.object({ name: z.string() }),
+          },
+        },
+        jwtOpenApi,
+      ),
+      (c) => {
+        // nested fragment header validation is active at type level
+        expectTypeOf(c.req.valid('header')).toEqualTypeOf<{
+          authorization: string;
+        }>();
+        return c.json({ name: 'John' }, 200);
+      },
+    );
+
+    const document = createOpenApiDocument(app, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+
+    const post = document.paths?.['/user']?.get;
+    expect(post?.security).toEqual([{ bearerAuth: [] }]);
+    // nested fragments append their tags after the outer fragment's
+    expect(post?.tags).toEqual(['User', 'Auth']);
+    expect(Object.keys(post?.responses ?? {})).toEqual(['200', '401']);
+  });
+
+  it('stacked fragments: the doc merges the same way (later wins conflicts)', () => {
+    const first = openApi({
+      tags: ['Auth'],
+      responses: {
+        401: { schema: z.object({ message: z.string() }) },
+      },
+    });
+
+    const second = openApi({
+      tags: ['User'],
+      responses: {
+        200: z.object({ name: z.string() }),
+      },
+    });
+
+    const app = new Hono().get('/user', first, second, (c) =>
+      c.json({ name: 'John' }, 200),
+    );
+
+    const document = createOpenApiDocument(app, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+
+    const post = document.paths?.['/user']?.get;
+    expect(post?.tags).toEqual(['Auth', 'User']);
+    expect(Object.keys(post?.responses ?? {})).toEqual(['200', '401']);
+  });
+
+  it('stacked fragments: identical schemas in both are allowed', () => {
+    const sameSchema = z.object({ name: z.string() });
+
+    const first = openApi({
+      responses: { 200: sameSchema },
+      request: { json: sameSchema },
+    });
+
+    const second = openApi({
+      responses: { 200: sameSchema },
+      request: { json: sameSchema },
+    });
+
+    const app = new Hono().get('/user', first, second, (c) =>
+      c.json(c.req.valid('json'), 200),
+    );
+
+    const document = createOpenApiDocument(app, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+
+    const post = document.paths?.['/user']?.get;
+    expect(Object.keys(post?.responses ?? {})).toEqual(['200']);
   });
 });

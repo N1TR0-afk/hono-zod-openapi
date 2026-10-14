@@ -2,6 +2,8 @@ import { zValidator } from '@hono/zod-validator';
 import { every } from 'hono/combine';
 import type { MiddlewareHandler } from 'hono';
 import * as z from 'zod';
+import { mergeOperations } from './mergeOperation.ts';
+import { FragmentShapeSymbol, OpenApiSymbol } from './symbols.ts';
 import { typedResponseMiddleware } from './typedResponse.ts';
 import type {
   HonoOpenApiFragmentMiddleware,
@@ -16,7 +18,7 @@ import type {
 } from './types.ts';
 import type { Env } from 'hono';
 
-export const OpenApiSymbol = Symbol();
+export { OpenApiSymbol } from './symbols.ts';
 
 /**
  * Used internally to create the `openApi` middleware. You can use it if you have a custom `zod-validator` middleware,
@@ -36,12 +38,33 @@ export function createOpenApiMiddleware(
     // oxlint-disable-next-line typescript/no-explicit-any
     ...middleware: Array<MiddlewareHandler<any, any, any, any>>
   ): MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>> => {
-    const { request } = operation;
+    // absorb nested fragments into a single, merge-aware metadata payload
+    let mergedOperation: HonoOpenApiOperation<
+      HonoOpenApiRequestSchemas,
+      HonoOpenApiResponses
+    > = operation as HonoOpenApiOperation<
+      HonoOpenApiRequestSchemas,
+      HonoOpenApiResponses
+    >;
+    for (const mw of middleware) {
+      // oxlint-disable-next-line typescript/no-explicit-any -- fragment detection on untyped middleware
+      const fragmentShape = (mw as any)[FragmentShapeSymbol] as unknown;
+      if (fragmentShape) {
+        mergedOperation = mergeOperations(
+          mergedOperation,
+          fragmentShape as HonoOpenApiOperation,
+        );
+      }
+    }
+
+    const { request } = mergedOperation;
     const metadata = {
-      [OpenApiSymbol]: operation,
+      [OpenApiSymbol]: mergedOperation,
+      [FragmentShapeSymbol]: mergedOperation,
     };
 
-    const resMiddleware = typedResponseMiddleware<Req, P, Res>(operation);
+    // the merged operation covers responses declared by nested fragments too
+    const resMiddleware = typedResponseMiddleware(mergedOperation);
 
     if (!request) {
       return Object.assign(every(...middleware, resMiddleware), metadata);
@@ -68,9 +91,10 @@ export function createOpenApiMiddleware(
   };
 
   // The implementation returns the shared runtime shape for every overload of
-  // `HonoOpenApiMiddleware` (per-middleware environment intersections cannot be
-  // expressed by the implementation's single signature). The declared interface
-  // is the contract; its type behavior is covered by type tests.
+  // `HonoOpenApiMiddleware` and of the fragment creator (per-middleware
+  // environment intersections and conflict checks cannot be expressed by the
+  // implementation's single signature). The declared interfaces are the
+  // contract; their type behavior is covered by type tests.
   return openApi as unknown as HonoOpenApiMiddleware;
 }
 
@@ -142,49 +166,5 @@ export const defineOpenApiOperation = <
 export function createOpenApiFragment<
   RouteEnv extends Env = Env,
 >(): HonoOpenApiFragmentMiddleware<RouteEnv> {
-  return ((
-    operation: HonoOpenApiOperation<
-      HonoOpenApiRequestSchemas,
-      HonoOpenApiResponses
-    >,
-    ...middleware: unknown[]
-  ) => {
-    const { request } = operation;
-    const metadata = {
-      [OpenApiSymbol]: operation,
-    };
-
-    const resMiddleware = typedResponseMiddleware(operation);
-
-    if (!request) {
-      return Object.assign(
-        every(...(middleware as MiddlewareHandler[]), resMiddleware),
-        metadata,
-      );
-    }
-
-    const validators = Object.entries(request)
-      .map(([target, schemaOrParams]) => {
-        const schema =
-          schemaOrParams instanceof z.ZodType
-            ? schemaOrParams
-            : (schemaOrParams as { validate?: boolean; schema: z.ZodType })
-                  .validate !== false
-              ? (schemaOrParams as { schema: z.ZodType }).schema
-              : null;
-
-        if (!schema) return null;
-
-        return zValidator(target as ValidationTarget, schema as z.ZodType);
-      })
-      .filter((v) => !!v);
-
-    const composed = every(
-      ...validators,
-      resMiddleware,
-      ...(middleware as MiddlewareHandler[]),
-    );
-
-    return Object.assign(composed, metadata);
-  }) as unknown as ReturnType<typeof createOpenApiFragment<RouteEnv>>;
+  return createOpenApiMiddleware() as unknown as HonoOpenApiFragmentMiddleware<RouteEnv>;
 }

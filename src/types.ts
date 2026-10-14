@@ -5,6 +5,7 @@ import type {
   ValidationTargets as ValidationTargetsWithForm,
 } from 'hono';
 import type { HandlerResponse, IntersectNonAnyTypes } from 'hono/types';
+import type { FragmentShapeSymbol } from './symbols.ts';
 import type { ResponseHeader } from 'hono/utils/headers';
 import type { ContentlessStatusCode, StatusCode } from 'hono/utils/http-status';
 import type { BaseMime } from 'hono/utils/mime';
@@ -201,7 +202,43 @@ export interface HonoOpenApiMiddleware {
     Res extends HonoOpenApiResponses,
   >(
     operation: HonoOpenApiOperation<Req, Res>,
-  ): MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>>;
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>>
+  >;
+
+  /**
+   * Compose a previously created `openApi` fragment (its middleware carries a
+   * shape marker) into this operation. Same request targets / response statuses
+   * declared with a different schema in both fragments are rejected statically;
+   * identical schemas are allowed. Run-time behavior: both fragments keep
+   * validating, and their operations are merged into one route metadata.
+   */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    FReq extends HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
+      (OpenApiShapeConflicts<Req, FReq, Res, FRes> extends true
+        ? unknown
+        : OpenApiFragmentConflictError),
+  ): OpenApiFragmentValue<
+    Req & FReq,
+    Res & FRes,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [HonoOpenApiMiddlewareEnv<Res>, HonoOpenApiMiddlewareEnv<FRes>]
+      >,
+      P,
+      Values<Req> & Values<FReq>,
+      OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+    >
+  >;
 
   <
     // oxlint-disable-next-line no-explicit-any
@@ -213,12 +250,18 @@ export interface HonoOpenApiMiddleware {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
-    middleware1: MiddlewareHandler<E1, P, any, X1>,
-  ): MiddlewareHandler<
-    IntersectNonAnyTypes<[E1, HonoOpenApiMiddlewareEnv<Res>]>,
-    P,
-    Values<Req>,
-    X1
+    middleware1: MiddlewareHandler<E1, P, any, X1> & {
+      [FragmentShapeSymbol]?: never;
+    },
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<[E1, HonoOpenApiMiddlewareEnv<Res>]>,
+      P,
+      Values<Req>,
+      X1
+    >
   >;
 
   <
@@ -234,14 +277,20 @@ export interface HonoOpenApiMiddleware {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
-    middleware1: MiddlewareHandler<E1, P, any, X1>,
+    middleware1: MiddlewareHandler<E1, P, any, X1> & {
+      [FragmentShapeSymbol]?: never;
+    },
     // oxlint-disable-next-line no-explicit-any
     middleware2: MiddlewareHandler<E2, P, any, X2>,
-  ): MiddlewareHandler<
-    IntersectNonAnyTypes<[E1, E2, HonoOpenApiMiddlewareEnv<Res>]>,
-    P,
-    Values<Req>,
-    X1 | X2
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<[E1, E2, HonoOpenApiMiddlewareEnv<Res>]>,
+      P,
+      Values<Req>,
+      X1 | X2
+    >
   >;
 
   <
@@ -288,6 +337,9 @@ type ExtractTypedMiddlewareResponseOnly<T> = T extends TypedResponse
 type AnyMiddleware = MiddlewareHandler<any, any, any, any>;
 // oxlint-disable-next-line typescript/no-explicit-any
 type AnyTypedResponse = TypedResponse<any, any, any>;
+// the unparameterized z.ZodType base used by blank request records; not comparable
+// oxlint-disable-next-line typescript/no-explicit-any
+type AnyZodSchema = z.ZodType<any, any, any>;
 
 /**
  * `TypedResponse` members a Hono middleware contributes to a route, mirroring
@@ -307,6 +359,94 @@ export type HonoMiddlewareTypedResponses<M extends AnyMiddleware> = M extends (
       ? ExtractTypedMiddlewareResponseOnly<R>
       : never
     : never;
+
+/**
+ * Middleware value created by `openApi()` / `createOpenApiFragment()`.
+ * Carries the operation's declared shapes so fragments can be composed and
+ * statically checked for conflicting schemas.
+ */
+export type OpenApiFragmentValue<
+  FReq extends HonoOpenApiRequestSchemas,
+  FRes extends HonoOpenApiResponses,
+  Mw extends AnyMiddleware = MiddlewareHandler,
+> = Mw & {
+  readonly [FragmentShapeSymbol]: {
+    readonly request?: FReq;
+    readonly responses: FRes;
+  };
+};
+
+/**
+ * Type for a parameter that cannot be satisfied — used by fragment slots to
+ * statically reject conflicting fragments.
+ */
+export interface OpenApiFragmentConflictError {
+  readonly 'openApi fragment conflict':
+    | 'same request target declared with a different schema'
+    | 'same response status declared with a different schema';
+}
+
+type SchemaOfTarget<T> =
+  T extends ValidationTargetParams<infer S>
+    ? S
+    : T extends AnyZodSchema
+      ? T
+      : never;
+
+// internal aliases used by type tests to inspect intermediate steps
+export type SchemaOfTargetInternal<T> = SchemaOfTarget<T>;
+export type ConcreteSchemaOutInternal<T extends AnyZodSchema> =
+  ConcreteSchemaOut<T>;
+export type EqualInternal<A, B> = Equal<A, B>;
+
+// schemas whose validated output is not a concrete shape (e.g. the bare
+// `z.ZodType` used by blank request records, `z.any()`) cannot be conflicting
+type ConcreteSchemaOut<T extends AnyZodSchema> =
+  z.output<T> extends never
+    ? never
+    : unknown extends z.output<T>
+      ? never
+      : z.output<T>;
+
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+    ? true
+    : false;
+
+type ConflictingKeys<Req, FReq> = {
+  [K in keyof Req & keyof FReq]: ConcreteSchemaOut<
+    Extract<SchemaOfTarget<Req[K]>, AnyZodSchema>
+  > extends never
+    ? never
+    : ConcreteSchemaOut<
+          Extract<SchemaOfTarget<FReq[K]>, AnyZodSchema>
+        > extends never
+      ? never
+      : Equal<
+            z.output<Extract<SchemaOfTarget<Req[K]>, AnyZodSchema>>,
+            z.output<Extract<SchemaOfTarget<FReq[K]>, AnyZodSchema>>
+          > extends true
+        ? never
+        : K;
+}[keyof Req & keyof FReq];
+
+/**
+ * Whether a fragment middleware may be composed into an operation without
+ * conflicting schemas (same request target or response status declared with a
+ * different schema in both). Schemas that cannot be compared (not zod, e.g.
+ * plain OpenAPI response objects or `validate: false` targets) are allowed.
+ */
+export type OpenApiShapeConflicts<
+  Req extends HonoOpenApiRequestSchemas,
+  FReq extends HonoOpenApiRequestSchemas,
+  Res extends HonoOpenApiResponses,
+  FRes extends HonoOpenApiResponses,
+> =
+  ConflictingKeys<Req, FReq> extends never
+    ? ConflictingKeys<Res, FRes> extends never
+      ? true
+      : false
+    : false;
 
 export type OperationResponseTypes<Res extends HonoOpenApiResponses> =
   keyof ResponseSchemas<Res> extends never
@@ -366,6 +506,27 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
   >;
 
   <
+    FReq extends HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses,
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
+      (OpenApiShapeConflicts<Req, FReq, Res, FRes> extends true
+        ? unknown
+        : OpenApiFragmentConflictError),
+  ): MiddlewareHandler<
+    IntersectNonAnyTypes<
+      [FragmentEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
+    >,
+    P,
+    Values<Req> & Values<FReq>,
+    OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+  >;
+
+  <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
     Res extends HonoOpenApiResponses,
@@ -373,7 +534,7 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
     operation: HonoOpenApiOperation<Req, Res>,
-    middleware1: M1,
+    middleware1: M1 & { [FragmentShapeSymbol]?: never },
   ): MiddlewareHandler<
     FragmentEnv<RouteEnv, Res>,
     P,
@@ -391,8 +552,8 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
     operation: HonoOpenApiOperation<Req, Res>,
-    middleware1: M1,
-    middleware2: M2,
+    middleware1: M1 & { [FragmentShapeSymbol]?: never },
+    middleware2: M2 & { [FragmentShapeSymbol]?: never },
   ): MiddlewareHandler<
     FragmentEnv<RouteEnv, Res>,
     P,

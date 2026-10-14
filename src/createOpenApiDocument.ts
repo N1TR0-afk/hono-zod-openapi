@@ -7,7 +7,8 @@ import {
   createDocument,
 } from 'zod-openapi';
 import { normalizeResponse } from './normalizeResponse.ts';
-import { OpenApiSymbol } from './openApi.ts';
+import { mergeOperations } from './mergeOperation.ts';
+import { OpenApiSymbol } from './symbols.ts';
 import type {
   HonoOpenApiDocument,
   HonoOpenApiOperation,
@@ -115,7 +116,13 @@ export function createOpenApiDocument<
       paths[path] = {};
     }
 
-    paths[path][route.method.toLowerCase() as Method] = operation;
+    const method = route.method.toLowerCase() as Method;
+    // stacked `openApi()` fragments of the same route merge (the later
+    // fragment wins on conflicting doc keys)
+    const existingOperation = paths[path][method];
+    paths[path][method] = existingOperation
+      ? (mergeOperations(existingOperation, operation) as typeof operation)
+      : operation;
   }
 
   const openApiDoc = createDocument({

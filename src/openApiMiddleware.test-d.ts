@@ -331,3 +331,98 @@ describe('createOpenApiFragment', () => {
     expectTypeOf(app).not.toBeUndefined();
   });
 });
+
+describe('fragment conflict checking', () => {
+  it('same json target with a different schema is rejected statically', () => {
+    const fragment = openApi({
+      request: { json: z.object({ name: z.string() }) },
+      responses: { 200: z.object({ name: z.string() }) },
+    });
+
+    const _bad = openApi(
+      {
+        request: { json: z.object({ age: z.number() }) },
+        responses: { 200: z.object({ name: z.string() }) },
+      },
+      // @ts-expect-error route declares json with a different schema → conflict
+      fragment,
+    );
+    expectTypeOf(_bad).not.toBeUndefined();
+  });
+
+  it('same status with a different schema is rejected statically', () => {
+    const fragment = openApi({
+      responses: { 200: z.object({ name: z.string() }) },
+    });
+
+    const _bad2 = openApi(
+      { responses: { 200: z.object({ greeting: z.string() }) } },
+      // @ts-expect-error route declares 200 with a different schema → conflict
+      fragment,
+    );
+    expectTypeOf(_bad2).not.toBeUndefined();
+  });
+
+  it('identical schemas for the same keys are allowed', () => {
+    const schema = z.object({ name: z.string() });
+    const fragment = openApi({
+      request: { json: schema },
+      responses: { 200: schema },
+    });
+
+    const composed = openApi(
+      {
+        request: { json: z.object({ name: z.string() }) },
+        responses: { 200: z.object({ name: z.string() }) },
+      },
+      fragment,
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+  });
+
+  it('disjoint fragments compose without errors', () => {
+    const authFragment = openApi({
+      request: { header: z.object({ authorization: z.string() }) },
+      responses: { 401: z.object({ message: z.string() }) },
+    });
+
+    const composed = openApi(
+      {
+        request: { json: z.object({ name: z.string() }) },
+        responses: { 200: z.object({ name: z.string() }) },
+      },
+      authFragment,
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+  });
+
+  it('nested fragments keep merged client inference', () => {
+    const authFragment = openApi({
+      responses: { 401: z.object({ message: z.string() }) },
+    });
+
+    const routes = new Hono().post(
+      '/user',
+      openApi(
+        {
+          request: { json: z.object({ name: z.string() }) },
+          responses: { 200: z.object({ name: z.string() }) },
+        },
+        authFragment,
+      ),
+      (c) => c.json(c.req.valid('json'), 200),
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.user.$post({ json: { name: 'x' } });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+});
