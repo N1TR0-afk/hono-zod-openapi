@@ -1,8 +1,10 @@
 import type {
+  Env,
   MiddlewareHandler,
   TypedResponse,
   ValidationTargets as ValidationTargetsWithForm,
 } from 'hono';
+import type { HandlerResponse, IntersectNonAnyTypes } from 'hono/types';
 import type { ResponseHeader } from 'hono/utils/headers';
 import type { ContentlessStatusCode, StatusCode } from 'hono/utils/http-status';
 import type { BaseMime } from 'hono/utils/mime';
@@ -169,13 +171,107 @@ export interface HonoOpenApiOperation<
  */
 export type HonoOpenApiDocument = Omit<ZodOpenApiObject, 'openapi'>;
 
-export type HonoOpenApiMiddleware = <
-  Req extends HonoOpenApiRequestSchemas,
-  P extends string,
-  Res extends HonoOpenApiResponses,
->(
-  operation: HonoOpenApiOperation<Req, Res>,
-) => MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>>;
+/**
+ * The `openApi` middleware, optionally accepting reusable user middleware.
+ *
+ * When middleware is passed, the returned middleware composes them after the
+ * request validators and the typed-response middleware, and its environment is
+ * the intersection of the route environment (inferred from the passed
+ * middleware) and this library's `res` helper environment. Responses declared
+ * as `TypedResponse` by the passed middleware are merged into the route's
+ * Hono RPC client schema.
+ *
+ * @example
+ * ```ts
+ * app.post('/user', openApi(operation), handler); // pre-existing usage
+ * app.post(
+ *   '/user',
+ *   openApi(
+ *     operation,
+ *     auth, // MiddlewareHandler<AppEnv, string, {}, TypedResponse<...>>
+ *   ),
+ *   handler,
+ * );
+ * ```
+ */
+export interface HonoOpenApiMiddleware {
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+  ): MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>>;
+
+  <
+    // oxlint-disable-next-line no-explicit-any
+    X1 extends HandlerResponse<any>,
+    E1 extends Env,
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware1: MiddlewareHandler<E1, P, any, X1>,
+  ): MiddlewareHandler<
+    IntersectNonAnyTypes<[E1, HonoOpenApiMiddlewareEnv<Res>]>,
+    P,
+    Values<Req>,
+    X1
+  >;
+
+  <
+    // oxlint-disable-next-line no-explicit-any
+    X1 extends HandlerResponse<any>,
+    // oxlint-disable-next-line no-explicit-any
+    X2 extends HandlerResponse<any>,
+    E1 extends Env,
+    E2 extends Env,
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware1: MiddlewareHandler<E1, P, any, X1>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware2: MiddlewareHandler<E2, P, any, X2>,
+  ): MiddlewareHandler<
+    IntersectNonAnyTypes<[E1, E2, HonoOpenApiMiddlewareEnv<Res>]>,
+    P,
+    Values<Req>,
+    X1 | X2
+  >;
+
+  <
+    // oxlint-disable-next-line no-explicit-any
+    X1 extends HandlerResponse<any>,
+    // oxlint-disable-next-line no-explicit-any
+    X2 extends HandlerResponse<any>,
+    // oxlint-disable-next-line no-explicit-any
+    X3 extends HandlerResponse<any>,
+    E1 extends Env,
+    E2 extends Env,
+    E3 extends Env,
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware1: MiddlewareHandler<E1, P, any, X1>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware2: MiddlewareHandler<E2, P, any, X2>,
+    // oxlint-disable-next-line no-explicit-any
+    middleware3: MiddlewareHandler<E3, P, any, X3>,
+  ): MiddlewareHandler<
+    IntersectNonAnyTypes<[E1, E2, E3, HonoOpenApiMiddlewareEnv<Res>]>,
+    P,
+    Values<Req>,
+    X1 | X2 | X3
+  >;
+}
 
 type ExtractResponseSchema<T> = T extends SimpleResponseObject
   ? T['schema']

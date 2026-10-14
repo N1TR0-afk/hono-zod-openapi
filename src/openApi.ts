@@ -1,13 +1,16 @@
 import { zValidator } from '@hono/zod-validator';
 import { every } from 'hono/combine';
+import type { MiddlewareHandler } from 'hono';
 import * as z from 'zod';
 import { typedResponseMiddleware } from './typedResponse.ts';
 import type {
   HonoOpenApiMiddleware,
+  HonoOpenApiMiddlewareEnv,
   HonoOpenApiOperation,
   HonoOpenApiRequestSchemas,
   HonoOpenApiResponses,
   ValidationTarget,
+  Values,
   ZodValidatorFn,
 } from './types.ts';
 
@@ -22,11 +25,15 @@ export const OpenApiSymbol = Symbol();
 export function createOpenApiMiddleware(
   zodValidator: ZodValidatorFn = zValidator,
 ): HonoOpenApiMiddleware {
-  return function openApi<
+  const openApi = <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
     Res extends HonoOpenApiResponses,
-  >(operation: HonoOpenApiOperation<Req, Res>) {
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    // oxlint-disable-next-line typescript/no-explicit-any
+    ...middleware: Array<MiddlewareHandler<any, any, any, any>>
+  ): MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>> => {
     const { request } = operation;
     const metadata = {
       [OpenApiSymbol]: operation,
@@ -35,7 +42,7 @@ export function createOpenApiMiddleware(
     const resMiddleware = typedResponseMiddleware<Req, P, Res>(operation);
 
     if (!request) {
-      return Object.assign(resMiddleware, metadata);
+      return Object.assign(every(...middleware, resMiddleware), metadata);
     }
 
     const validators = Object.entries(request)
@@ -53,10 +60,16 @@ export function createOpenApiMiddleware(
       })
       .filter((v) => !!v);
 
-    const middleware = every(...validators, resMiddleware);
+    const composed = every(...validators, resMiddleware, ...middleware);
 
-    return Object.assign(middleware, metadata);
+    return Object.assign(composed, metadata);
   };
+
+  // The implementation returns the shared runtime shape for every overload of
+  // `HonoOpenApiMiddleware` (per-middleware environment intersections cannot be
+  // expressed by the implementation's single signature). The declared interface
+  // is the contract; its type behavior is covered by type tests.
+  return openApi as unknown as HonoOpenApiMiddleware;
 }
 
 /**
