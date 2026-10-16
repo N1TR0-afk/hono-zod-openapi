@@ -19,6 +19,96 @@ const documentData = {
 };
 
 describe('createOpenApiDocument', () => {
+  it('throws when sibling chain middleware and the route declare the same request target differently', () => {
+    const authFragment = openApi({
+      request: {
+        header: z.object({
+          authorization: z.string().startsWith('Bearer ').optional(),
+        }),
+      },
+      responses: {
+        401: z.object({ code: z.string(), message: z.string() }),
+      },
+    });
+
+    const app = new Hono().get(
+      '/me',
+      authFragment,
+      openApi({
+        request: {
+          header: z.object({ authorization: z.number() }),
+        },
+        responses: {
+          200: z.object({ ok: z.string() }),
+        },
+      }),
+      (c) => c.var.res(200, { ok: 'never reached' }),
+    );
+
+    expect(() => createOpenApiDocument(app, documentData)).toThrowError(
+      /GET \/me.*'header'.*different schema/,
+    );
+  });
+
+  it('throws when a sibling middleware declares a response status differently', () => {
+    const fragment = openApi({
+      responses: {
+        401: z.object({ code: z.string() }),
+      },
+    });
+
+    const app = new Hono().get(
+      '/me',
+      fragment,
+      openApi({
+        responses: {
+          200: z.object({ ok: z.string() }),
+          401: z.object({ message: z.string() }),
+        },
+      }),
+      (c) => c.var.res(200, { ok: 'never reached' }),
+    );
+
+    expect(() => createOpenApiDocument(app, documentData)).toThrowError(
+      /GET \/me.*'401'.*different schema/,
+    );
+  });
+
+  it('allows sibling declarations that are output-compatible', () => {
+    const fragment = openApi({
+      request: {
+        header: z.object({
+          authorization: z.string().optional(),
+        }),
+      },
+      responses: {
+        401: z.object({ code: z.string(), message: z.string() }),
+      },
+    });
+
+    const app = new Hono().get(
+      '/me',
+      fragment,
+      openApi({
+        request: {
+          header: z.object({
+            // meta/documentation differences do not change the contract
+            authorization: z
+              .string()
+              .meta({ description: 'Bearer token' })
+              .optional(),
+          }),
+        },
+        responses: {
+          200: z.object({ ok: z.string() }),
+        },
+      }),
+      (c) => c.var.res(200, { ok: 'reached' }),
+    );
+
+    expect(() => createOpenApiDocument(app, documentData)).not.toThrow();
+  });
+
   it('correctly passes metadata to the document and creates the document under /doc route', async () => {
     const app = new Hono();
 

@@ -426,3 +426,174 @@ describe('fragment conflict checking', () => {
     expectTypeOf(run).not.toBeUndefined();
   });
 });
+
+describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
+  type AppEnv = {
+    Bindings: { JWT_SECRET: string };
+    Variables: { jwtPayload: unknown };
+  };
+
+  const openApiFragment = createOpenApiFragment<AppEnv>();
+
+  const jwtMiddleware = openApiFragment(
+    {
+      security: [{ bearerAuth: [] }],
+      tags: ['Auth'],
+      request: {
+        header: z.object({
+          authorization: z
+            .string()
+            .startsWith('Bearer ')
+            .meta({ description: 'Bearer token' })
+            .optional(),
+        }),
+      },
+      responses: {
+        401: {
+          description: 'Missing, malformed or expired bearer token',
+          schema: z.object({ code: z.string(), message: z.string() }),
+        },
+        '4XX': z.any(),
+        default: {
+          description:
+            'Any other failure, normalized by the global error handler',
+          schema: z.object({ code: z.string(), message: z.string() }),
+        },
+      },
+    },
+    async (c, next) => {
+      try {
+        const authorization = c.req.header('authorization');
+        if (!authorization?.startsWith('Bearer ')) {
+          throw new Error('Missing or malformed bearer token');
+        }
+        const secret = c.env.JWT_SECRET;
+        expectTypeOf(secret).toEqualTypeOf<string>();
+        c.set('jwtPayload', { id: 1, username: 'u', iat: 0 });
+        await next();
+        return undefined;
+      } catch (error) {
+        return c.var.res(401, {
+          code: 'UNAUTHORIZED',
+          message:
+            error instanceof Error
+              ? error.message
+              : 'Invalid or expired bearer token',
+        });
+      }
+    },
+  );
+
+  it('mismatched 401 payload and required-vs-optional header are rejected', () => {
+    const routeMw = openApi(
+      {
+        request: {
+          header: z.object({
+            authorization: z.string(),
+          }),
+        },
+        responses: {
+          200: z.object({
+            id: z.string(),
+            username: z.string(),
+            issuedAt: z.string(),
+          }),
+          401: {
+            schema: z.object({ name: z.string() }),
+          },
+        },
+      },
+      // @ts-expect-error required header + different 401 payload both conflict with the fragment
+      jwtMiddleware,
+    );
+    expectTypeOf(routeMw).not.toBeUndefined();
+  });
+
+  it('matching contracts compose: same 401 payload and same requiredness', () => {
+    const composed = openApi(
+      {
+        tags: ['Auth'],
+        request: {
+          header: z.object({
+            // .meta() is cosmetic; the validated contract matches the fragment
+            authorization: z
+              .string()
+              .meta({ description: 'same contract' })
+              .optional(),
+          }),
+        },
+        responses: {
+          200: {
+            description: 'The payload of the presented bearer token',
+            schema: z.object({
+              id: z.string(),
+              username: z.string(),
+              issuedAt: z.string(),
+            }),
+          },
+          401: {
+            description: 'Different description, same schema',
+            schema: z.object({ code: z.string(), message: z.string() }),
+          },
+        },
+      },
+      jwtMiddleware,
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+  });
+
+  it('creator fragments keep merged client inference after nesting', () => {
+    const routes = new Hono<AppEnv>().post(
+      '/me',
+      openApi(
+        {
+          request: {
+            header: z.object({
+              authorization: z.string().startsWith('Bearer ').optional(),
+            }),
+            json: z.object({ name: z.string() }),
+          },
+          responses: {
+            200: {
+              description: 'ok',
+              schema: z.object({
+                id: z.string(),
+                username: z.string(),
+                issuedAt: z.string(),
+              }),
+            },
+          },
+        },
+        jwtMiddleware,
+      ),
+      async (c) => {
+        expectTypeOf(c.get('jwtPayload')).toEqualTypeOf<unknown>();
+        const { name } = c.req.valid('json');
+        expectTypeOf(name).toEqualTypeOf<string>();
+        return c.var.res(200, { id: '1', username: 'u', issuedAt: '' });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.me.$post({
+        json: { name: 'x' },
+        header: { authorization: 'Bearer t' },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          id: string;
+          username: string;
+          issuedAt: string;
+        }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+});

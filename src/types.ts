@@ -309,16 +309,22 @@ export interface HonoOpenApiMiddleware {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
-    middleware1: MiddlewareHandler<E1, P, any, X1>,
+    middleware1: MiddlewareHandler<E1, P, any, X1> & {
+      [FragmentShapeSymbol]?: never;
+    },
     // oxlint-disable-next-line no-explicit-any
     middleware2: MiddlewareHandler<E2, P, any, X2>,
     // oxlint-disable-next-line no-explicit-any
     middleware3: MiddlewareHandler<E3, P, any, X3>,
-  ): MiddlewareHandler<
-    IntersectNonAnyTypes<[E1, E2, E3, HonoOpenApiMiddlewareEnv<Res>]>,
-    P,
-    Values<Req>,
-    X1 | X2 | X3
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<[E1, E2, E3, HonoOpenApiMiddlewareEnv<Res>]>,
+      P,
+      Values<Req>,
+      X1 | X2 | X3
+    >
   >;
 }
 
@@ -368,7 +374,7 @@ export type HonoMiddlewareTypedResponses<M extends AnyMiddleware> = M extends (
 export type OpenApiFragmentValue<
   FReq extends HonoOpenApiRequestSchemas,
   FRes extends HonoOpenApiResponses,
-  Mw extends AnyMiddleware = MiddlewareHandler,
+  Mw extends AnyMiddleware = AnyMiddleware,
 > = Mw & {
   readonly [FragmentShapeSymbol]: {
     readonly request?: FReq;
@@ -498,11 +504,15 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
     Res extends HonoOpenApiResponses,
   >(
     operation: HonoOpenApiOperation<Req, Res>,
-  ): MiddlewareHandler<
-    FragmentEnv<RouteEnv, Res>,
-    P,
-    Values<Req>,
-    OperationResponseTypes<Res>
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      FragmentEnv<RouteEnv, Res>,
+      P,
+      Values<Req>,
+      OperationResponseTypes<Res>
+    >
   >;
 
   <
@@ -517,13 +527,17 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
       (OpenApiShapeConflicts<Req, FReq, Res, FRes> extends true
         ? unknown
         : OpenApiFragmentConflictError),
-  ): MiddlewareHandler<
-    IntersectNonAnyTypes<
-      [FragmentEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
-    >,
-    P,
-    Values<Req> & Values<FReq>,
-    OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+  ): OpenApiFragmentValue<
+    Req & FReq,
+    Res & FRes,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [FragmentEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
+      >,
+      P,
+      Values<Req> & Values<FReq>,
+      OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+    >
   >;
 
   <
@@ -535,11 +549,15 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     middleware1: M1 & { [FragmentShapeSymbol]?: never },
-  ): MiddlewareHandler<
-    FragmentEnv<RouteEnv, Res>,
-    P,
-    Values<Req>,
-    HonoMiddlewareTypedResponses<M1> | OperationResponseTypes<Res>
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      FragmentEnv<RouteEnv, Res>,
+      P,
+      Values<Req>,
+      HonoMiddlewareTypedResponses<M1> | OperationResponseTypes<Res>
+    >
   >;
 
   <
@@ -554,13 +572,17 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
     operation: HonoOpenApiOperation<Req, Res>,
     middleware1: M1 & { [FragmentShapeSymbol]?: never },
     middleware2: M2 & { [FragmentShapeSymbol]?: never },
-  ): MiddlewareHandler<
-    FragmentEnv<RouteEnv, Res>,
-    P,
-    Values<Req>,
-    | HonoMiddlewareTypedResponses<M1>
-    | HonoMiddlewareTypedResponses<M2>
-    | OperationResponseTypes<Res>
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      FragmentEnv<RouteEnv, Res>,
+      P,
+      Values<Req>,
+      | HonoMiddlewareTypedResponses<M1>
+      | HonoMiddlewareTypedResponses<M2>
+      | OperationResponseTypes<Res>
+    >
   >;
 
   <
@@ -575,17 +597,21 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
     operation: HonoOpenApiOperation<Req, Res>,
-    middleware1: M1,
-    middleware2: M2,
-    middleware3: M3,
-  ): MiddlewareHandler<
-    FragmentEnv<RouteEnv, Res>,
-    P,
-    Values<Req>,
-    | HonoMiddlewareTypedResponses<M1>
-    | HonoMiddlewareTypedResponses<M2>
-    | HonoMiddlewareTypedResponses<M3>
-    | OperationResponseTypes<Res>
+    middleware1: M1 & { [FragmentShapeSymbol]?: never },
+    middleware2: M2 & { [FragmentShapeSymbol]?: never },
+    middleware3: M3 & { [FragmentShapeSymbol]?: never },
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      FragmentEnv<RouteEnv, Res>,
+      P,
+      Values<Req>,
+      | HonoMiddlewareTypedResponses<M1>
+      | HonoMiddlewareTypedResponses<M2>
+      | HonoMiddlewareTypedResponses<M3>
+      | OperationResponseTypes<Res>
+    >
   >;
 }
 

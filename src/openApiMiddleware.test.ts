@@ -484,6 +484,31 @@ describe('createOpenApiFragment', () => {
 });
 
 describe('openApi fragment merging', () => {
+  it('composed fragment: the route\u0027s op status stays callable from the handler (c.var.res is not overwritten by the fragment\u0027s inner res)', async () => {
+    const authFragment = openApi({
+      responses: {
+        401: z.object({ code: z.string(), message: z.string() }),
+      },
+    });
+
+    const app = new Hono().get(
+      '/user',
+      openApi(
+        {
+          responses: {
+            200: z.object({ userId: z.string() }),
+          },
+        },
+        authFragment,
+      ),
+      (c) => c.var.res(200, { userId: 'u1' }),
+    );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ userId: 'u1' });
+  });
+
   it('nested fragment: operations merge into a single metadata (doc) payload', () => {
     const jwtOpenApi = openApi({
       security: [{ bearerAuth: [] }],

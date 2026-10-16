@@ -8,6 +8,10 @@ import {
 } from 'zod-openapi';
 import { normalizeResponse } from './normalizeResponse.ts';
 import { mergeOperations } from './mergeOperation.ts';
+import {
+  describeRuntimeConflict,
+  detectOpenApiRuntimeConflicts,
+} from './conflicts.ts';
 import { OpenApiSymbol } from './symbols.ts';
 import type {
   HonoOpenApiDocument,
@@ -89,6 +93,15 @@ export function createOpenApiDocument<
 ): ReturnType<typeof createDocument> {
   const paths: ZodOpenApiPathsObject = {};
 
+  // every chain entry of a route is registered as its own route in Hono, so
+  // the shapes of sibling middlewares (e.g. a reusable auth fragment and the
+  // route's own `openApi()`) collected here would otherwise merge silently
+  // with the later declaration winning. Fail fast on conflicting schemas.
+  const shapesByRoute = new Map<
+    string,
+    Array<{ path: string; operation: HonoOpenApiOperation }>
+  >();
+
   for (const route of router.routes) {
     const handler =
       COMPOSED_HANDLER in route.handler
@@ -105,6 +118,11 @@ export function createOpenApiDocument<
 
     const path = normalizePathParams(route.path);
     const pathWithMethod = `${route.method} ${path}`;
+    const routeKey = `${route.method} ${route.path}`;
+
+    const shapes = shapesByRoute.get(routeKey) ?? [];
+    shapes.push({ path, operation: { request, responses, ...rest } });
+    shapesByRoute.set(routeKey, shapes);
 
     const operation: ZodOpenApiOperationObject = {
       responses: processResponses(responses, pathWithMethod),
@@ -123,6 +141,24 @@ export function createOpenApiDocument<
     paths[path][method] = existingOperation
       ? (mergeOperations(existingOperation, operation) as typeof operation)
       : operation;
+  }
+
+  for (const [routeKey, shapes] of shapesByRoute) {
+    for (let i = 1; i < shapes.length; i += 1) {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        shapes[i - 1].operation,
+        shapes[i].operation,
+      );
+
+      if (conflicts.length > 0) {
+        const details = conflicts.map(describeRuntimeConflict).join(', ');
+        throw new Error(
+          `${routeKey}: ${details} declared with different schemas along the same route chain. ` +
+            'The last declaration wins silently otherwise; align the schemas ' +
+            '(an output-compatible declaration, e.g. one that differs only in metadata, is accepted).',
+        );
+      }
+    }
   }
 
   const openApiDoc = createDocument({
