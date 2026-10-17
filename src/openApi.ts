@@ -3,7 +3,16 @@ import { every } from 'hono/combine';
 import type { MiddlewareHandler } from 'hono';
 import * as z from 'zod';
 import { mergeOperations } from './mergeOperation.ts';
-import { FragmentShapeSymbol, OpenApiSymbol } from './symbols.ts';
+import {
+  describeRuntimeConflict,
+  detectOpenApiRuntimeConflicts,
+} from './conflicts.ts';
+import {
+  FragmentMiddlewareSymbol,
+  FragmentShapeSymbol,
+  OpenApiSymbol,
+  RequestValidationSchemaSymbol,
+} from './symbols.ts';
 import { typedResponseMiddleware } from './typedResponse.ts';
 import type {
   HonoOpenApiFragmentMiddleware,
@@ -46,14 +55,36 @@ export function createOpenApiMiddleware(
       HonoOpenApiRequestSchemas,
       HonoOpenApiResponses
     >;
+    const composedMiddleware: MiddlewareHandler[] = [];
     for (const mw of middleware) {
       // oxlint-disable-next-line typescript/no-explicit-any -- fragment detection on untyped middleware
       const fragmentShape = (mw as any)[FragmentShapeSymbol] as unknown;
       if (fragmentShape) {
+        const conflicts = detectOpenApiRuntimeConflicts(
+          mergedOperation,
+          fragmentShape as HonoOpenApiOperation,
+        );
+        if (conflicts.length > 0) {
+          throw new Error(
+            `openApi(): ${conflicts.map(describeRuntimeConflict).join(', ')} conflict. ` +
+              'Request targets may add distinct properties, but a property cannot be redeclared with a different schema and a response status cannot be redeclared.',
+          );
+        }
         mergedOperation = mergeOperations(
           mergedOperation,
           fragmentShape as HonoOpenApiOperation,
         );
+        // Reuse the fragment's author middleware, but don't rerun its
+        // validators; the merged operation validates each target once.
+        const fragmentMiddleware = (
+          mw as unknown as Record<PropertyKey, unknown>
+        )[FragmentMiddlewareSymbol];
+        const nestedMiddleware = Array.isArray(fragmentMiddleware)
+          ? (fragmentMiddleware as MiddlewareHandler[])
+          : [mw];
+        composedMiddleware.push(...nestedMiddleware);
+      } else {
+        composedMiddleware.push(mw);
       }
     }
 
@@ -67,7 +98,11 @@ export function createOpenApiMiddleware(
     const resMiddleware = typedResponseMiddleware(mergedOperation);
 
     if (!request) {
-      return Object.assign(every(...middleware, resMiddleware), metadata);
+      return Object.assign(
+        every(...composedMiddleware, resMiddleware),
+        metadata,
+        { [FragmentMiddlewareSymbol]: composedMiddleware },
+      );
     }
 
     const validators = Object.entries(request)
@@ -76,7 +111,8 @@ export function createOpenApiMiddleware(
           schemaOrParams instanceof z.ZodType
             ? schemaOrParams
             : schemaOrParams.validate !== false
-              ? schemaOrParams.schema
+              ? (schemaOrParams[RequestValidationSchemaSymbol] ??
+                schemaOrParams.schema)
               : null;
 
         if (!schema) return null;
@@ -85,9 +121,11 @@ export function createOpenApiMiddleware(
       })
       .filter((v) => !!v);
 
-    const composed = every(...validators, resMiddleware, ...middleware);
+    const composed = every(...validators, resMiddleware, ...composedMiddleware);
 
-    return Object.assign(composed, metadata);
+    return Object.assign(composed, metadata, {
+      [FragmentMiddlewareSymbol]: composedMiddleware,
+    });
   };
 
   // The implementation returns the shared runtime shape for every overload of

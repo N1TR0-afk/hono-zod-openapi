@@ -5,7 +5,10 @@ import type {
   ValidationTargets as ValidationTargetsWithForm,
 } from 'hono';
 import type { HandlerResponse, IntersectNonAnyTypes } from 'hono/types';
-import type { FragmentShapeSymbol } from './symbols.ts';
+import type {
+  FragmentShapeSymbol,
+  RequestValidationSchemaSymbol,
+} from './symbols.ts';
 import type { ResponseHeader } from 'hono/utils/headers';
 import type { ContentlessStatusCode, StatusCode } from 'hono/utils/http-status';
 import type { BaseMime } from 'hono/utils/mime';
@@ -31,6 +34,8 @@ export type ValidationTargetParams<T extends z.ZodType> = {
    * @default true
    */
   validate?: boolean;
+  /** @internal Runtime schema when the documented schema includes doc-only fields. */
+  [RequestValidationSchemaSymbol]?: z.ZodType;
 };
 
 type StatusCodePrefix = '1' | '2' | '3' | '4' | '5';
@@ -211,9 +216,9 @@ export interface HonoOpenApiMiddleware {
   /**
    * Compose a previously created `openApi` fragment (its middleware carries a
    * shape marker) into this operation. Same request targets / response statuses
-   * declared with a different schema in both fragments are rejected statically;
-   * identical schemas are allowed. Run-time behavior: both fragments keep
-   * validating, and their operations are merged into one route metadata.
+   * Request object properties are merged; overlapping properties with a
+   * different output schema are rejected. Response statuses cannot be
+   * redeclared. The combined operation validates each request target once.
    */
   <
     Req extends HonoOpenApiRequestSchemas,
@@ -388,8 +393,8 @@ export type OpenApiFragmentValue<
  */
 export interface OpenApiFragmentConflictError {
   readonly 'openApi fragment conflict':
-    | 'same request target declared with a different schema'
-    | 'same response status declared with a different schema';
+    | 'same request property declared with a different schema'
+    | 'response status redeclared';
 }
 
 type SchemaOfTarget<T> =
@@ -436,11 +441,38 @@ type ConflictingKeys<Req, FReq> = {
         : K;
 }[keyof Req & keyof FReq];
 
+type ObjectShape<T> = T extends z.ZodObject<infer Shape> ? Shape : never;
+type PropertyConflicts<A, B> = {
+  [K in keyof A & keyof B]: Equal<z.output<A[K]>, z.output<B[K]>> extends true
+    ? never
+    : K;
+}[keyof A & keyof B];
+type ConflictingRequestKeys<Req, FReq> = {
+  [K in keyof Req & keyof FReq]: ObjectShape<
+    Extract<SchemaOfTarget<Req[K]>, AnyZodSchema>
+  > extends infer A
+    ? [A] extends [never]
+      ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
+        ? never
+        : K
+      : ObjectShape<
+            Extract<SchemaOfTarget<FReq[K]>, AnyZodSchema>
+          > extends infer B
+        ? [B] extends [never]
+          ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
+            ? never
+            : K
+          : PropertyConflicts<A, B> extends never
+            ? never
+            : `${K & string}.${PropertyConflicts<A, B> & string}`
+        : never
+    : never;
+}[keyof Req & keyof FReq];
+
 /**
  * Whether a fragment middleware may be composed into an operation without
- * conflicting schemas (same request target or response status declared with a
- * different schema in both). Schemas that cannot be compared (not zod, e.g.
- * plain OpenAPI response objects or `validate: false` targets) are allowed.
+ * conflicting request properties or a repeated response status. Request object
+ * schemas may declare disjoint properties on the same target.
  */
 export type OpenApiShapeConflicts<
   Req extends HonoOpenApiRequestSchemas,
@@ -448,8 +480,8 @@ export type OpenApiShapeConflicts<
   Res extends HonoOpenApiResponses,
   FRes extends HonoOpenApiResponses,
 > =
-  ConflictingKeys<Req, FReq> extends never
-    ? ConflictingKeys<Res, FRes> extends never
+  ConflictingRequestKeys<Req, FReq> extends never
+    ? keyof Res & keyof FRes extends never
       ? true
       : false
     : false;

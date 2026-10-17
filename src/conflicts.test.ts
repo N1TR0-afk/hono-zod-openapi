@@ -20,26 +20,43 @@ describe('detectOpenApiRuntimeConflicts', () => {
   });
 
   describe('request conflicts', () => {
-    it('adds a conflict when the same target is declared with two different payloads', () => {
+    it('allows disjoint properties within the same target', () => {
       const first: HonoOpenApiOperation = {
         request: { header: z.object({ authorization: z.string() }) },
         responses: {},
       };
       const second: HonoOpenApiOperation = {
-        request: { header: z.object({ authorization: z.number() }) },
+        request: { header: z.object({ 'x-request-id': z.string() }) },
         responses: {},
       };
 
       const conflicts = detectOpenApiRuntimeConflicts(first, second);
-      expect(conflicts).toContainEqual({ kind: 'request', key: 'header' });
+      expect(conflicts).toEqual([]);
     });
 
-    it('does not fight over cosmetic differences like descriptions or refinements', () => {
+    it('adds a conflict when the same property has a different schema', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: { header: z.object({ authorization: z.string() }) },
+          responses: {},
+        },
+        {
+          request: { header: z.object({ authorization: z.number() }) },
+          responses: {},
+        },
+      );
+      expect(conflicts).toContainEqual({
+        kind: 'request',
+        key: 'header.authorization',
+      });
+    });
+
+    it('allows cosmetic metadata differences', () => {
       const first: HonoOpenApiOperation = {
         request: {
           header: z
             .object({
-              authorization: z.string().min(1).meta({ description: 'auth' }),
+              authorization: z.string().meta({ description: 'auth' }),
             })
             .meta({ description: 'first' }),
         },
@@ -56,10 +73,27 @@ describe('detectOpenApiRuntimeConflicts', () => {
 
       expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
     });
+
+    it('rejects different validation refinements on the same property', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: { header: z.object({ id: z.string().min(1) }) },
+          responses: {},
+        },
+        {
+          request: { header: z.object({ id: z.string().max(10) }) },
+          responses: {},
+        },
+      );
+      expect(conflicts).toContainEqual({
+        kind: 'request',
+        key: 'header.id',
+      });
+    });
   });
 
   describe('response conflicts', () => {
-    it('adds a conflict when the same status is declared with two different schemas', () => {
+    it('rejects a response status redeclaration even when schemas differ', () => {
       const first: HonoOpenApiOperation = {
         responses: { 401: z.object({ message: z.string() }) },
       };
@@ -93,7 +127,7 @@ describe('detectOpenApiRuntimeConflicts', () => {
       expect(conflicts).toContainEqual({ kind: 'responses', key: '401' });
     });
 
-    it('treats doc-only wildcard aliases (z.any) as non-comparable', () => {
+    it('rejects a doc-only wildcard status when it is redeclared', () => {
       const first: HonoOpenApiOperation = {
         responses: { '4XX': z.any(), default: z.object({ code: z.string() }) },
       };
@@ -101,10 +135,13 @@ describe('detectOpenApiRuntimeConflicts', () => {
         responses: { '4XX': z.object({ code: z.string() }) },
       };
 
-      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
+      expect(detectOpenApiRuntimeConflicts(first, second)).toContainEqual({
+        kind: 'responses',
+        key: '4XX',
+      });
     });
 
-    it('skips responses without a zod schema', () => {
+    it('rejects redeclared responses without a zod schema', () => {
       const first: HonoOpenApiOperation = {
         responses: { 204: { description: 'No content' } },
       };
@@ -112,10 +149,13 @@ describe('detectOpenApiRuntimeConflicts', () => {
         responses: { 204: z.never() },
       };
 
-      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
+      expect(detectOpenApiRuntimeConflicts(first, second)).toContainEqual({
+        kind: 'responses',
+        key: '204',
+      });
     });
 
-    it('treats required-vs-optional members as conflicting', () => {
+    it('treats required-vs-optional properties as conflicting', () => {
       const first: HonoOpenApiOperation = {
         request: {
           header: z.object({ authorization: z.string() }),
@@ -132,7 +172,10 @@ describe('detectOpenApiRuntimeConflicts', () => {
       };
 
       const conflicts = detectOpenApiRuntimeConflicts(first, second);
-      expect(conflicts).toContainEqual({ kind: 'request', key: 'header' });
+      expect(conflicts).toContainEqual({
+        kind: 'request',
+        key: 'header.authorization',
+      });
     });
   });
 });

@@ -145,18 +145,19 @@ export function createOpenApiDocument<
 
   for (const [routeKey, shapes] of shapesByRoute) {
     for (let i = 1; i < shapes.length; i += 1) {
-      const conflicts = detectOpenApiRuntimeConflicts(
-        shapes[i - 1].operation,
-        shapes[i].operation,
-      );
-
-      if (conflicts.length > 0) {
-        const details = conflicts.map(describeRuntimeConflict).join(', ');
-        throw new Error(
-          `${routeKey}: ${details} declared with different schemas along the same route chain. ` +
-            'The last declaration wins silently otherwise; align the schemas ' +
-            '(an output-compatible declaration, e.g. one that differs only in metadata, is accepted).',
+      for (let j = 0; j < i; j += 1) {
+        const conflicts = detectOpenApiRuntimeConflicts(
+          shapes[j].operation,
+          shapes[i].operation,
         );
+
+        if (conflicts.length > 0) {
+          const details = conflicts.map(describeRuntimeConflict).join(', ');
+          throw new Error(
+            `${routeKey}: ${details} conflict along the same route chain. ` +
+              'Request targets may add distinct properties, but a property cannot be redeclared with a different schema and a response status cannot be redeclared.',
+          );
+        }
       }
     }
   }

@@ -1,3 +1,5 @@
+import * as z from 'zod';
+import { RequestValidationSchemaSymbol } from './symbols.ts';
 import type {
   HonoOpenApiOperation,
   HonoOpenApiRequestSchemas,
@@ -58,17 +60,58 @@ const mergeResponses = (
 const mergeRequests = (
   a: HonoOpenApiRequestSchemas | undefined,
   b: HonoOpenApiRequestSchemas | undefined,
-): HonoOpenApiRequestSchemas => ({
-  ...a,
-  ...b,
-});
+): HonoOpenApiRequestSchemas => {
+  const merged = { ...a, ...b };
+  for (const target of Object.keys(a ?? {}) as Array<
+    keyof HonoOpenApiRequestSchemas
+  >) {
+    if (!(target in (b ?? {}))) continue;
+
+    const first = a?.[target];
+    const second = b?.[target];
+    if (!first || !second) continue;
+
+    const firstSchema = first instanceof z.ZodType ? first : first.schema;
+    const secondSchema = second instanceof z.ZodType ? second : second.schema;
+    const combine = (left: z.ZodType, right: z.ZodType): z.ZodType =>
+      left instanceof z.ZodObject && right instanceof z.ZodObject
+        ? left.extend(right.shape)
+        : right;
+    const schema = combine(firstSchema, secondSchema);
+    const firstValidation =
+      first instanceof z.ZodType || first.validate !== false
+        ? first instanceof z.ZodType
+          ? first
+          : (first[RequestValidationSchemaSymbol] ?? first.schema)
+        : undefined;
+    const secondValidation =
+      second instanceof z.ZodType || second.validate !== false
+        ? second instanceof z.ZodType
+          ? second
+          : (second[RequestValidationSchemaSymbol] ?? second.schema)
+        : undefined;
+    const validationSchema = firstValidation
+      ? secondValidation
+        ? combine(firstValidation, secondValidation)
+        : firstValidation
+      : secondValidation;
+
+    merged[target] = {
+      schema,
+      validate: validationSchema !== undefined,
+      ...(validationSchema && {
+        [RequestValidationSchemaSymbol]: validationSchema,
+      }),
+    };
+  }
+  return merged;
+};
 
 /**
  * Merges two OpenAPI operation fragments into one.
  *
- * - `responses` merge per status code; the second fragment wins conflicts.
- * - `request` merges per target (`json`, `header`, ...); the second fragment
- *   wins conflicts.
+ * - `responses` merge per status code; conflict checks prevent redeclarations.
+ * - Request object schemas merge per property within each target.
  * - Array keys (`tags`, `security`, `parameters`, `servers`, `callbacks`)
  *   concatenate and dedupe.
  * - Remaining scalar document keys: the second fragment wins.

@@ -46,7 +46,7 @@ describe('createOpenApiDocument', () => {
     );
 
     expect(() => createOpenApiDocument(app, documentData)).toThrowError(
-      /GET \/me.*'header'.*different schema/,
+      /GET \/me.*header\.authorization.*conflict/,
     );
   });
 

@@ -333,47 +333,58 @@ describe('createOpenApiFragment', () => {
 });
 
 describe('fragment conflict checking', () => {
-  it('same json target with a different schema is rejected statically', () => {
+  it('different properties on the same request target merge', () => {
     const fragment = openApi({
       request: { json: z.object({ name: z.string() }) },
-      responses: { 200: z.object({ name: z.string() }) },
+      responses: {},
     });
 
-    const _bad = openApi(
+    const composed = openApi(
       {
         request: { json: z.object({ age: z.number() }) },
-        responses: { 200: z.object({ name: z.string() }) },
+        responses: {},
       },
-      // @ts-expect-error route declares json with a different schema → conflict
       fragment,
     );
-    expectTypeOf(_bad).not.toBeUndefined();
+    expectTypeOf(composed).not.toBeUndefined();
   });
 
-  it('same status with a different schema is rejected statically', () => {
+  it('same request property with a different schema is rejected statically', () => {
+    const fragment = openApi({
+      request: { json: z.object({ name: z.string() }) },
+      responses: {},
+    });
+    const invalid = () =>
+      openApi(
+        { request: { json: z.object({ name: z.number() }) }, responses: {} },
+        // @ts-expect-error the overlapping json.name property has a different schema
+        fragment,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
+
+  it('response status cannot be redeclared, even with the same schema', () => {
     const fragment = openApi({
       responses: { 200: z.object({ name: z.string() }) },
     });
 
-    const _bad2 = openApi(
-      { responses: { 200: z.object({ greeting: z.string() }) } },
-      // @ts-expect-error route declares 200 with a different schema → conflict
-      fragment,
-    );
-    expectTypeOf(_bad2).not.toBeUndefined();
+    const invalid = () =>
+      // @ts-expect-error response status 200 is already declared by the fragment
+      openApi({ responses: { 200: z.object({ name: z.string() }) } }, fragment);
+    expectTypeOf(invalid).not.toBeUndefined();
   });
 
-  it('identical schemas for the same keys are allowed', () => {
+  it('identical request properties are allowed when request schemas merge', () => {
     const schema = z.object({ name: z.string() });
     const fragment = openApi({
       request: { json: schema },
-      responses: { 200: schema },
+      responses: {},
     });
 
     const composed = openApi(
       {
         request: { json: z.object({ name: z.string() }) },
-        responses: { 200: z.object({ name: z.string() }) },
+        responses: {},
       },
       fragment,
     );
@@ -485,27 +496,28 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
   );
 
   it('mismatched 401 payload and required-vs-optional header are rejected', () => {
-    const routeMw = openApi(
-      {
-        request: {
-          header: z.object({
-            authorization: z.string(),
-          }),
-        },
-        responses: {
-          200: z.object({
-            id: z.string(),
-            username: z.string(),
-            issuedAt: z.string(),
-          }),
-          401: {
-            schema: z.object({ name: z.string() }),
+    const routeMw = () =>
+      openApi(
+        {
+          request: {
+            header: z.object({
+              authorization: z.string(),
+            }),
+          },
+          responses: {
+            200: z.object({
+              id: z.string(),
+              username: z.string(),
+              issuedAt: z.string(),
+            }),
+            401: {
+              schema: z.object({ name: z.string() }),
+            },
           },
         },
-      },
-      // @ts-expect-error required header + different 401 payload both conflict with the fragment
-      jwtMiddleware,
-    );
+        // @ts-expect-error required header + different 401 payload both conflict with the fragment
+        jwtMiddleware,
+      );
     expectTypeOf(routeMw).not.toBeUndefined();
   });
 
@@ -531,10 +543,6 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
               issuedAt: z.string(),
             }),
           },
-          401: {
-            description: 'Different description, same schema',
-            schema: z.object({ code: z.string(), message: z.string() }),
-          },
         },
       },
       jwtMiddleware,
@@ -549,7 +557,7 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
         {
           request: {
             header: z.object({
-              authorization: z.string().startsWith('Bearer ').optional(),
+              'x-request-id': z.string(),
             }),
             json: z.object({ name: z.string() }),
           },
@@ -568,6 +576,10 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
       ),
       async (c) => {
         expectTypeOf(c.get('jwtPayload')).toEqualTypeOf<unknown>();
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          'x-request-id': string;
+        }>();
         const { name } = c.req.valid('json');
         expectTypeOf(name).toEqualTypeOf<string>();
         return c.var.res(200, { id: '1', username: 'u', issuedAt: '' });
@@ -578,7 +590,7 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
     const run = async () => {
       const res = await client.me.$post({
         json: { name: 'x' },
-        header: { authorization: 'Bearer t' },
+        header: { authorization: 'Bearer t', 'x-request-id': 'req-1' },
       });
       if (res.status === 200) {
         expectTypeOf(await res.json()).toEqualTypeOf<{

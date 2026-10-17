@@ -23,27 +23,12 @@ export interface OpenApiRuntimeConflict {
   key: string;
 }
 
-/**
- * Keys that only refine the schema without changing its validated output
- * (the static check compares `z.output` equality, so excluding them mirrors
- * "different description, same schema" compositions being allowed).
- */
+/** Metadata does not affect validation; validation constraints do. */
 const REFERENCE_ONLY_KEYS = new Set([
   'description',
   'example',
   'examples',
   'title',
-  'default',
-  'format',
-  'pattern',
-  'minLength',
-  'maxLength',
-  'minimum',
-  'maximum',
-  'exclusiveMinimum',
-  'exclusiveMaximum',
-  'multipleOf',
-  'additionalProperties',
 ]);
 
 export interface OpenApiRuntimeConflict {
@@ -79,41 +64,6 @@ const schemaOfRequestTarget = (value: unknown): z.ZodType | null => {
     }
 
     return value.schema;
-  }
-
-  return null;
-};
-
-const schemaOfResponse = (value: unknown): z.ZodType | null => {
-  if (value instanceof z.ZodType) {
-    return value;
-  }
-
-  if (!value || typeof value !== 'object' || '$ref' in value) {
-    return null;
-  }
-
-  if ('schema' in value && value.schema instanceof z.ZodType) {
-    return value.schema;
-  }
-
-  if (
-    'content' in value &&
-    value.content &&
-    typeof value.content === 'object'
-  ) {
-    for (const mediaDefinition of Object.values(
-      value.content as Record<string, unknown>,
-    )) {
-      if (
-        mediaDefinition &&
-        typeof mediaDefinition === 'object' &&
-        'schema' in mediaDefinition &&
-        mediaDefinition.schema instanceof z.ZodType
-      ) {
-        return mediaDefinition.schema;
-      }
-    }
   }
 
   return null;
@@ -200,6 +150,24 @@ const conflictingRequestTargets = (
       continue;
     }
 
+    if (
+      firstSchema instanceof z.ZodObject &&
+      secondSchema instanceof z.ZodObject
+    ) {
+      for (const property of Object.keys(firstSchema.shape)) {
+        if (!(property in secondSchema.shape)) continue;
+        const firstProperty = firstSchema.shape[property];
+        const secondProperty = secondSchema.shape[property];
+        if (
+          firstProperty.isOptional() !== secondProperty.isOptional() ||
+          !outputsEqual(firstProperty, secondProperty)
+        ) {
+          conflicts.push(`${target}.${property}`);
+        }
+      }
+      continue;
+    }
+
     if (!outputsEqual(firstSchema, secondSchema)) {
       conflicts.push(target);
     }
@@ -218,17 +186,7 @@ const conflictingResponseKeys = (
   >) {
     if (!(status in second)) continue;
 
-    const firstSchema = schemaOfResponse(first[status]);
-    const secondSchema = schemaOfResponse(second[status]);
-
-    if (!firstSchema || !secondSchema) continue;
-    if (!isConcreteSchema(firstSchema) || !isConcreteSchema(secondSchema)) {
-      continue;
-    }
-
-    if (!outputsEqual(firstSchema, secondSchema)) {
-      conflicts.push(status);
-    }
+    conflicts.push(status);
   }
 
   return conflicts;
@@ -237,7 +195,7 @@ const conflictingResponseKeys = (
 /**
  * Compares the declarations of two `openApi` shapes attached to the same
  * route chain. Returns every target/status key that both declare with
- * schemas of different validated outputs (an empty array means compatible).
+ * schemas that cannot be redeclared (an empty array means compatible).
  */
 export const detectOpenApiRuntimeConflicts = (
   first: HonoOpenApiOperation,
@@ -270,5 +228,5 @@ export const describeRuntimeConflict = (
   conflict: OpenApiRuntimeConflict,
 ): string =>
   conflict.kind === 'request'
-    ? `request target '${conflict.key}'`
-    : `response '${conflict.key}'`;
+    ? `request property '${conflict.key}'`
+    : `response status '${conflict.key}'`;
