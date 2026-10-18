@@ -214,8 +214,7 @@ export interface HonoOpenApiMiddleware {
   >;
 
   /**
-   * Compose a previously created `openApi` fragment (its middleware carries a
-   * shape marker) into this operation. Same request targets / response statuses
+   * Compose a previously created `openApi` fragment into this operation.
    * Request object properties are merged; overlapping properties with a
    * different output schema are rejected. Response statuses cannot be
    * redeclared. The combined operation validates each request target once.
@@ -229,9 +228,7 @@ export interface HonoOpenApiMiddleware {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
-      (OpenApiShapeConflicts<Req, FReq, Res, FRes> extends true
-        ? unknown
-        : OpenApiFragmentConflictError),
+      OpenApiShapeConflict<Req, FReq, Res, FRes>,
   ): OpenApiFragmentValue<
     Req & FReq,
     Res & FRes,
@@ -391,11 +388,9 @@ export type OpenApiFragmentValue<
  * Type for a parameter that cannot be satisfied — used by fragment slots to
  * statically reject conflicting fragments.
  */
-export interface OpenApiFragmentConflictError {
-  readonly 'openApi fragment conflict':
-    | 'same request property declared with a different schema'
-    | 'response status redeclared';
-}
+export type OpenApiFragmentConflictError<Details extends string = string> = {
+  readonly 'openApi fragment conflict': Details;
+};
 
 type SchemaOfTarget<T> =
   T extends ValidationTargetParams<infer S>
@@ -479,12 +474,36 @@ export type OpenApiShapeConflicts<
   FReq extends HonoOpenApiRequestSchemas,
   Res extends HonoOpenApiResponses,
   FRes extends HonoOpenApiResponses,
+> = [OpenApiShapeConflictDetails<Req, FReq, Res, FRes>] extends [never]
+  ? true
+  : false;
+
+type RequestConflictMessage<Conflict> = Conflict extends string
+  ? `request property "${Conflict}" has an incompatible schema`
+  : never;
+type ResponseConflictMessage<Status> = Status extends string | number
+  ? `response status "${Status}" is already declared`
+  : never;
+
+export type OpenApiShapeConflictDetails<
+  Req extends HonoOpenApiRequestSchemas,
+  FReq extends HonoOpenApiRequestSchemas,
+  Res extends HonoOpenApiResponses,
+  FRes extends HonoOpenApiResponses,
 > =
-  ConflictingRequestKeys<Req, FReq> extends never
-    ? keyof Res & keyof FRes extends never
-      ? true
-      : false
-    : false;
+  | RequestConflictMessage<ConflictingRequestKeys<Req, FReq>>
+  | ResponseConflictMessage<keyof Res & keyof FRes>;
+
+export type OpenApiShapeConflict<
+  Req extends HonoOpenApiRequestSchemas,
+  FReq extends HonoOpenApiRequestSchemas,
+  Res extends HonoOpenApiResponses,
+  FRes extends HonoOpenApiResponses,
+> = [OpenApiShapeConflictDetails<Req, FReq, Res, FRes>] extends [never]
+  ? unknown
+  : OpenApiFragmentConflictError<
+      OpenApiShapeConflictDetails<Req, FReq, Res, FRes>
+    >;
 
 export type OperationResponseTypes<Res extends HonoOpenApiResponses> =
   keyof ResponseSchemas<Res> extends never
@@ -556,9 +575,7 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
   >(
     operation: HonoOpenApiOperation<Req, Res>,
     fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
-      (OpenApiShapeConflicts<Req, FReq, Res, FRes> extends true
-        ? unknown
-        : OpenApiFragmentConflictError),
+      OpenApiShapeConflict<Req, FReq, Res, FRes>,
   ): OpenApiFragmentValue<
     Req & FReq,
     Res & FRes,

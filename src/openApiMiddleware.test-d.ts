@@ -6,6 +6,7 @@ import type { InferRequestType } from 'hono/client';
 import { describe, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
 import { createOpenApiFragment, openApi } from './openApi.ts';
+import type { OpenApiShapeConflictDetails } from './types.ts';
 
 interface AppBindings {
   SESSIONS: Map<string, string>;
@@ -333,6 +334,28 @@ describe('createOpenApiFragment', () => {
 });
 
 describe('fragment conflict checking', () => {
+  it('includes the conflicting property or status in the diagnostic type', () => {
+    const firstHeader = z.object({ authorization: z.string() });
+    const secondHeader = z.object({ authorization: z.number() });
+    expectTypeOf<
+      OpenApiShapeConflictDetails<
+        { header: typeof firstHeader },
+        { header: typeof secondHeader },
+        Record<never, never>,
+        Record<never, never>
+      >
+    >().toEqualTypeOf<'request property "header.authorization" has an incompatible schema'>();
+
+    expectTypeOf<
+      OpenApiShapeConflictDetails<
+        Record<never, never>,
+        Record<never, never>,
+        { 401: typeof firstHeader },
+        { 401: typeof secondHeader }
+      >
+    >().toEqualTypeOf<'response status "401" is already declared'>();
+  });
+
   it('different properties on the same request target merge', () => {
     const fragment = openApi({
       request: { json: z.object({ name: z.string() }) },

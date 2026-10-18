@@ -496,7 +496,7 @@ describe('openApi fragment merging', () => {
           request: { header: z.object({ authorization: z.number() }) },
           responses: { 200: z.object({ ok: z.boolean() }) },
         },
-        // @ts-expect-error same request property has a different schema
+        // @ts-expect-error the same header property has a different schema
         fragment,
       ),
     ).toThrow(/header\.authorization/);
