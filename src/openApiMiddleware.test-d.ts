@@ -572,6 +572,121 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
     },
   );
 
+  it('composes multiple creator fragments with merged request and response inference', () => {
+    const threeFragments = openApiFragment(
+      {
+        request: { header: z.object({}) },
+        responses: { 200: z.object({ ok: z.boolean() }) },
+      },
+      jwtMiddleware,
+      requestIdMiddleware,
+      traceMiddleware,
+    );
+    expectTypeOf(threeFragments).not.toBeUndefined();
+
+    const errorEnvelope = z.object({
+      code: z.string(),
+      message: z.string(),
+    });
+    const badRequestEnvelope = z.object({
+      status: z.boolean(),
+      errors: errorEnvelope,
+    });
+    const combinedJwtMiddleware = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            authorization: z
+              .string()
+              .startsWith('Bearer ')
+              .meta({ description: 'Bearer token' })
+              .optional(),
+          }),
+        },
+        responses: {
+          401: errorEnvelope,
+          400: badRequestEnvelope,
+        },
+      },
+      async (c, next) => {
+        expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+        await next();
+      },
+    );
+    const someOtherMiddleware = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            additionalHeaderField: z.string().optional(),
+          }),
+        },
+        responses: { 400: badRequestEnvelope },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+
+    const routes = new Hono<AppEnv>().get(
+      '/me',
+      openApiFragment(
+        {
+          request: {
+            header: z.object({
+              additionalHeaderField: z.string().optional(),
+              authorization: z
+                .string()
+                .startsWith('Bearer ')
+                .meta({ description: 'Bearer token' })
+                .optional(),
+            }),
+          },
+          responses: {
+            200: z.object({ ok: z.boolean() }),
+            400: badRequestEnvelope,
+            401: errorEnvelope,
+          },
+        },
+        combinedJwtMiddleware,
+        someOtherMiddleware,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          additionalHeaderField?: string | undefined;
+        }>();
+        expectTypeOf(c.get('jwtPayload')).toEqualTypeOf<unknown>();
+        return c.var.res(200, { ok: true });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.me.$get({
+        header: {
+          authorization: 'Bearer token',
+          additionalHeaderField: 'extra',
+        },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+      if (res.status === 400) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          status: boolean;
+          errors: { code: string; message: string };
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+
   it('composes multiple fragments with merged request and response inference', () => {
     const routes = new Hono<AppEnv>().get(
       '/me',
@@ -630,6 +745,36 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
       }
     };
     expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('checks conflicts when composing multiple creator fragments', () => {
+    const duplicateRequest = openApiFragment({
+      request: {
+        header: z.object({ authorization: z.number() }),
+      },
+      responses: {},
+    });
+    const invalidRequest = () =>
+      // @ts-expect-error header.authorization conflicts with the JWT fragment
+      openApiFragment(
+        { responses: { 200: z.object({ ok: z.boolean() }) } },
+        jwtMiddleware,
+        duplicateRequest,
+      );
+
+    const duplicateResponse = openApiFragment({
+      responses: { 400: z.object({ code: z.string() }) },
+    });
+    const invalidResponse = () =>
+      // @ts-expect-error response status 400 conflicts with both fragments
+      openApiFragment(
+        { responses: { 200: z.object({ ok: z.boolean() }) } },
+        jwtMiddleware,
+        duplicateResponse,
+      );
+
+    expectTypeOf(invalidRequest).not.toBeUndefined();
+    expectTypeOf(invalidResponse).not.toBeUndefined();
   });
 
   it('reports response conflicts between fragments', () => {

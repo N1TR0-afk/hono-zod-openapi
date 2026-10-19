@@ -730,6 +730,94 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
     >
   >;
 
+  /** Compose two fragments, checking conflicts against the accumulated shape. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
+  ): OpenApiFragmentValue<
+    Req & F1Req & F2Req,
+    Res & F1Res & F2Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          FragmentEnv<RouteEnv, Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+    >
+  >;
+
+  /** Compose three fragments, checking conflicts against the accumulated shape. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+    F3Req extends HonoOpenApiRequestSchemas,
+    F3Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
+    fragment3: OpenApiFragmentValue<F3Req, F3Res> &
+      OpenApiShapeConflict<
+        Req & F1Req & F2Req,
+        F3Req,
+        Res & F1Res & F2Res,
+        F3Res
+      >,
+  ): OpenApiFragmentValue<
+    Req & F1Req & F2Req & F3Req,
+    Res & F1Res & F2Res & F3Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          FragmentEnv<RouteEnv, Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+          HonoOpenApiMiddlewareEnv<F3Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<
+          MergeRequestValues<Values<Req>, Values<F1Req>>,
+          Values<F2Req>
+        >,
+        Values<F3Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+      | OperationResponseTypes<F3Res>
+    >
+  >;
+
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
