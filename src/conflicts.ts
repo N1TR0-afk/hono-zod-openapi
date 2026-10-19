@@ -31,11 +31,6 @@ const REFERENCE_ONLY_KEYS = new Set([
   'title',
 ]);
 
-export interface OpenApiRuntimeConflict {
-  kind: 'request' | 'responses';
-  key: string;
-}
-
 /**
  * Schemas whose validated output is not a concrete shape (e.g. `z.any()`) are
  * not comparable — same as the static check, they never conflict.
@@ -100,11 +95,10 @@ const canonicalize = (node: unknown, key?: string): unknown => {
     return node;
   }
 
+  const record = node as Record<string, unknown>;
   const result: Record<string, unknown> = {};
-  for (const memberKey of Object.keys(
-    node as Record<string, unknown>,
-    // oxlint-disable-next-line unicorn/no-array-sort -- freshly-created array, safe to sort in place
-  ).sort()) {
+  // oxlint-disable-next-line unicorn/no-array-sort -- freshly-created array, safe to sort in place
+  for (const memberKey of Object.keys(record).sort()) {
     if (memberKey.startsWith('x-')) continue;
     if (REFERENCE_ONLY_KEYS.has(memberKey)) continue;
     if (memberKey === '$ref' || memberKey === '$schema' || memberKey === 'id') {
@@ -114,10 +108,7 @@ const canonicalize = (node: unknown, key?: string): unknown => {
       return {};
     }
 
-    const value = canonicalize(
-      (node as Record<string, unknown>)[memberKey],
-      memberKey,
-    );
+    const value = canonicalize(record[memberKey], memberKey);
     if (value !== undefined) {
       result[memberKey] = value;
     }
@@ -126,11 +117,11 @@ const canonicalize = (node: unknown, key?: string): unknown => {
   return result;
 };
 
-const schemaShape = (schema: z.ZodType): unknown =>
-  canonicalize(createSchema(schema, { io: 'output' }).schema);
+const schemaSignature = (schema: z.ZodType): string =>
+  JSON.stringify(canonicalize(createSchema(schema, { io: 'output' }).schema));
 
 const outputsEqual = (first: z.ZodType, second: z.ZodType): boolean =>
-  JSON.stringify(schemaShape(first)) === JSON.stringify(schemaShape(second));
+  schemaSignature(first) === schemaSignature(second);
 
 const schemasOfResponse = (response: unknown): z.ZodType[] | null => {
   if (response instanceof z.ZodType) return [response];
@@ -181,12 +172,8 @@ const sameResponseSchema = (first: unknown, second: unknown): boolean => {
     return false;
   }
 
-  const firstShapes = firstSchemas.map((schema) =>
-    JSON.stringify(schemaShape(schema)),
-  );
-  const secondShapes = secondSchemas.map((schema) =>
-    JSON.stringify(schemaShape(schema)),
-  );
+  const firstShapes = firstSchemas.map(schemaSignature);
+  const secondShapes = secondSchemas.map(schemaSignature);
   // Content member order does not change the response's schema set.
   firstShapes.sort();
   secondShapes.sort();

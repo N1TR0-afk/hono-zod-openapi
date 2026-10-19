@@ -15,6 +15,9 @@ const ARRAY_KEYS = [
 ] as const;
 
 type ArrayKey = (typeof ARRAY_KEYS)[number];
+type RequestSchema = NonNullable<
+  HonoOpenApiRequestSchemas[keyof HonoOpenApiRequestSchemas]
+>;
 
 const dedupe = <T>(values: T[]): T[] => {
   const seen = new Set<string>();
@@ -57,6 +60,26 @@ const mergeResponses = (
   ...b,
 });
 
+const requestSchema = (request: RequestSchema): z.ZodType =>
+  request instanceof z.ZodType ? request : request.schema;
+
+const validationSchemaOf = (request: RequestSchema): z.ZodType | undefined => {
+  if (request instanceof z.ZodType) return request;
+  if (request.validate === false) return undefined;
+  return request[RequestValidationSchemaSymbol] ?? request.schema;
+};
+
+const mergeSchemas = (first: z.ZodType, second: z.ZodType): z.ZodType =>
+  first instanceof z.ZodObject && second instanceof z.ZodObject
+    ? first.extend(second.shape)
+    : second;
+
+const mergeOptionalSchemas = (
+  first: z.ZodType | undefined,
+  second: z.ZodType | undefined,
+): z.ZodType | undefined =>
+  first && second ? mergeSchemas(first, second) : (first ?? second);
+
 const mergeRequests = (
   a: HonoOpenApiRequestSchemas | undefined,
   b: HonoOpenApiRequestSchemas | undefined,
@@ -71,30 +94,11 @@ const mergeRequests = (
     const second = b?.[target];
     if (!first || !second) continue;
 
-    const firstSchema = first instanceof z.ZodType ? first : first.schema;
-    const secondSchema = second instanceof z.ZodType ? second : second.schema;
-    const combine = (left: z.ZodType, right: z.ZodType): z.ZodType =>
-      left instanceof z.ZodObject && right instanceof z.ZodObject
-        ? left.extend(right.shape)
-        : right;
-    const schema = combine(firstSchema, secondSchema);
-    const firstValidation =
-      first instanceof z.ZodType || first.validate !== false
-        ? first instanceof z.ZodType
-          ? first
-          : (first[RequestValidationSchemaSymbol] ?? first.schema)
-        : undefined;
-    const secondValidation =
-      second instanceof z.ZodType || second.validate !== false
-        ? second instanceof z.ZodType
-          ? second
-          : (second[RequestValidationSchemaSymbol] ?? second.schema)
-        : undefined;
-    const validationSchema = firstValidation
-      ? secondValidation
-        ? combine(firstValidation, secondValidation)
-        : firstValidation
-      : secondValidation;
+    const schema = mergeSchemas(requestSchema(first), requestSchema(second));
+    const validationSchema = mergeOptionalSchemas(
+      validationSchemaOf(first),
+      validationSchemaOf(second),
+    );
 
     merged[target] = {
       schema,

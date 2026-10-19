@@ -657,18 +657,6 @@ export type OperationResponseTypes<Res extends HonoOpenApiResponses> =
       }[keyof ResponseSchemas<Res>];
 
 /**
- * Call signatures of the creator returned by {@link createOpenApiFragment}.
- *
- * Every middleware slot carries the fragment's seeded environment (app
- * bindings/variables intersected with the `res` helper environment) and the
- * validated-input types derived from the operation, so middleware written
- * inline get `c.env`, `c.req.valid()` and `c.var.res()` typed without extra
- * annotations. Middleware annotated with their own environment are accepted as
- * well when it is compatible with the seeded environment. Responses declared as
- * `TypedResponse` by the passed middleware are merged into the route's Hono RPC
- * client schema.
- */
-/**
  * Middleware shape accepted by a fragment: the fragment's seeded environment
  * (route environment intersected with the `res` helper environment) and the
  * operation's validated-input types.
@@ -689,6 +677,18 @@ export type FragmentEnv<
   Res extends HonoOpenApiResponses,
 > = IntersectNonAnyTypes<[RouteEnv, HonoOpenApiMiddlewareEnv<Res>]>;
 
+/**
+ * Call signatures of the creator returned by {@link createOpenApiFragment}.
+ *
+ * Every middleware slot carries the fragment's seeded environment (app
+ * bindings/variables intersected with the `res` helper environment) and the
+ * validated-input types derived from the operation, so middleware written
+ * inline get `c.env`, `c.req.valid()` and `c.var.res()` typed without extra
+ * annotations. Middleware annotated with their own environment are accepted as
+ * well when it is compatible with the seeded environment. Responses declared as
+ * `TypedResponse` by the passed middleware are merged into the route's Hono RPC
+ * client schema.
+ */
 export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
   <
     Req extends HonoOpenApiRequestSchemas,

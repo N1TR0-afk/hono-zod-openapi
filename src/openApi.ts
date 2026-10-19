@@ -97,15 +97,7 @@ export function createOpenApiMiddleware(
     // the merged operation covers responses declared by nested fragments too
     const resMiddleware = typedResponseMiddleware(mergedOperation);
 
-    if (!request) {
-      return Object.assign(
-        every(...composedMiddleware, resMiddleware),
-        metadata,
-        { [FragmentMiddlewareSymbol]: composedMiddleware },
-      );
-    }
-
-    const validators = Object.entries(request)
+    const validators = Object.entries(request ?? {})
       .map(([target, schemaOrParams]) => {
         const schema =
           schemaOrParams instanceof z.ZodType
@@ -121,11 +113,11 @@ export function createOpenApiMiddleware(
       })
       .filter((v) => !!v);
 
-    const composed = every(...validators, resMiddleware, ...composedMiddleware);
-
-    return Object.assign(composed, metadata, {
-      [FragmentMiddlewareSymbol]: composedMiddleware,
-    });
+    return Object.assign(
+      every(...validators, resMiddleware, ...composedMiddleware),
+      metadata,
+      { [FragmentMiddlewareSymbol]: composedMiddleware },
+    );
   };
 
   // The implementation returns the shared runtime shape for every overload of
