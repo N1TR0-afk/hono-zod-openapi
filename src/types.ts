@@ -1,5 +1,6 @@
 import type {
   Env,
+  Input,
   MiddlewareHandler,
   TypedResponse,
   ValidationTargets as ValidationTargetsWithForm,
@@ -100,16 +101,49 @@ type GetValidationSchemas<T extends HonoOpenApiRequestSchemas> = Clean<{
       : never;
 }>;
 
+// A target's schemas are a TypeScript union only after `openApi` fragments are
+// composed (see the composition overloads). At runtime `mergeOperations` folds
+// those schemas with `ZodObject.extend`, so the validated value is the merge of
+// the members' object shapes, not a union of them.
+type UnionToIntersection<T> = (
+  T extends unknown ? (value: T) => void : never
+) extends (value: infer Intersected) => void
+  ? Intersected
+  : never;
+
+type IsUnion<T, Whole = T> = (
+  T extends unknown ? ([Whole] extends [T] ? never : true) : never
+) extends never
+  ? false
+  : true;
+
+// Merges a union of schema-derived values into one object (and leaves single
+// schemas untouched, so a `z.union` whose output is a union keeps its meaning).
+type MergeSchemaUnion<Schema, Value> =
+  IsUnion<Schema> extends true
+    ? UnionToIntersection<Value> extends infer Merged
+      ? [Merged] extends [never]
+        ? Value
+        : Merged
+      : Value
+    : Value;
+
 type ToValidatorValues<T extends ValidationSchemas> = {
   in: Clean<{
     [K in keyof ValidationTargets]: IsUnknown<T[K]> extends true
       ? never
-      : ExtractInValues<Exclude<T[K], undefined>, K>;
+      : MergeSchemaUnion<
+          Exclude<T[K], undefined>,
+          ExtractInValues<Exclude<T[K], undefined>, K>
+        >;
   }>;
   out: Clean<{
     [K in keyof ValidationTargets]: IsUnknown<T[K]> extends true
       ? never
-      : z.output<Exclude<T[K], undefined>>;
+      : MergeSchemaUnion<
+          Exclude<T[K], undefined>,
+          z.output<Exclude<T[K], undefined>>
+        >;
   }>;
 };
 
@@ -204,6 +238,199 @@ export interface HonoOpenApiOperation<
  */
 export type HonoOpenApiDocument = Omit<ZodOpenApiObject, 'openapi'>;
 
+type OperationMiddlewareEnv<
+  RouteEnv extends Env | undefined,
+  Res extends HonoOpenApiResponses,
+> = RouteEnv extends Env
+  ? FragmentEnv<RouteEnv, Res>
+  : HonoOpenApiMiddlewareEnv<Res>;
+
+type ComposedFragmentEnv<
+  RouteEnv extends Env | undefined,
+  Res extends HonoOpenApiResponses,
+  FRes extends HonoOpenApiResponses,
+> = IntersectNonAnyTypes<
+  [OperationMiddlewareEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
+>;
+
+type InlineCompositionMiddleware<
+  RouteEnv extends Env | undefined,
+  Res extends HonoOpenApiResponses,
+  P extends string,
+  ReqValues extends Input,
+  MiddlewareEnv extends Env,
+  MiddlewareResponse extends HandlerResponse<unknown>,
+> = MiddlewareHandler<
+  RouteEnv extends Env ? FragmentEnv<RouteEnv, Res> : MiddlewareEnv,
+  P,
+  ReqValues,
+  MiddlewareResponse
+>;
+
+/** Shared operation and fragment composition signatures for both helpers. */
+interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+  ): OpenApiFragmentValue<
+    Req,
+    Res,
+    MiddlewareHandler<
+      OperationMiddlewareEnv<RouteEnv, Res>,
+      P,
+      Values<Req>,
+      OperationResponseTypes<Res>
+    >
+  >;
+
+  /** Compose a fragment followed by inline Hono middleware. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    FReq extends HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses,
+    E1 extends Env,
+    X1 extends HandlerResponse<unknown>,
+    M1 extends InlineCompositionMiddleware<
+      RouteEnv,
+      Res & FRes,
+      P,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
+      E1,
+      X1
+    >,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
+      OpenApiShapeConflict<Req, FReq, Res, FRes>,
+    middleware: M1 & { [FragmentShapeSymbol]?: never },
+  ): OpenApiFragmentValue<
+    Req | FReq,
+    Res & FRes,
+    MiddlewareHandler<
+      RouteEnv extends Env
+        ? ComposedFragmentEnv<RouteEnv, Res, FRes>
+        : IntersectNonAnyTypes<
+            [E1, HonoOpenApiMiddlewareEnv<Res>, HonoOpenApiMiddlewareEnv<FRes>]
+          >,
+      P,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
+      OperationResponseTypes<Res> | OperationResponseTypes<FRes> | X1
+    >
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    FReq extends HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
+      OpenApiShapeConflict<Req, FReq, Res, FRes>,
+  ): OpenApiFragmentValue<
+    Req | FReq,
+    Res & FRes,
+    MiddlewareHandler<
+      ComposedFragmentEnv<RouteEnv, Res, FRes>,
+      P,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
+      OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+    >
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+  ): OpenApiFragmentValue<
+    Req | F1Req | F2Req,
+    Res & F1Res & F2Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          OperationMiddlewareEnv<RouteEnv, Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+    >
+  >;
+
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+    F3Req extends HonoOpenApiRequestSchemas,
+    F3Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+    fragment3: OpenApiFragmentValue<F3Req, F3Res> &
+      OpenApiShapeConflict<
+        Req | F1Req | F2Req,
+        F3Req,
+        Res & F1Res & F2Res,
+        F3Res
+      >,
+  ): OpenApiFragmentValue<
+    Req | F1Req | F2Req | F3Req,
+    Res & F1Res & F2Res & F3Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          OperationMiddlewareEnv<RouteEnv, Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+          HonoOpenApiMiddlewareEnv<F3Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<
+          MergeRequestValues<Values<Req>, Values<F1Req>>,
+          Values<F2Req>
+        >,
+        Values<F3Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+      | OperationResponseTypes<F3Res>
+    >
+  >;
+}
+
 /**
  * The `openApi` middleware, optionally accepting reusable user middleware.
  *
@@ -227,137 +454,7 @@ export type HonoOpenApiDocument = Omit<ZodOpenApiObject, 'openapi'>;
  * );
  * ```
  */
-export interface HonoOpenApiMiddleware {
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-  ): OpenApiFragmentValue<
-    Req,
-    Res,
-    MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>>
-  >;
-
-  /**
-   * Compose a previously created `openApi` fragment into this operation.
-   * Request object properties are merged; overlapping properties with a
-   * different output schema are rejected. A response status may be repeated
-   * only when its schema matches. The combined operation validates each
-   * request target once.
-   */
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-    FReq extends HonoOpenApiRequestSchemas,
-    FRes extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
-      OpenApiShapeConflict<Req, FReq, Res, FRes>,
-  ): OpenApiFragmentValue<
-    Req & FReq,
-    Res & FRes,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [HonoOpenApiMiddlewareEnv<Res>, HonoOpenApiMiddlewareEnv<FRes>]
-      >,
-      P,
-      MergeRequestValues<Values<Req>, Values<FReq>>,
-      OperationResponseTypes<Res> | OperationResponseTypes<FRes>
-    >
-  >;
-
-  /** Compose two fragments into an operation, checking conflicts cumulatively. */
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
-      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
-    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
-  ): OpenApiFragmentValue<
-    Req & F1Req & F2Req,
-    Res & F1Res & F2Res,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          HonoOpenApiMiddlewareEnv<Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-        ]
-      >,
-      P,
-      MergeRequestValues<
-        MergeRequestValues<Values<Req>, Values<F1Req>>,
-        Values<F2Req>
-      >,
-      | OperationResponseTypes<Res>
-      | OperationResponseTypes<F1Res>
-      | OperationResponseTypes<F2Res>
-    >
-  >;
-
-  /** Compose three fragments into an operation, checking conflicts cumulatively. */
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-    F3Req extends HonoOpenApiRequestSchemas,
-    F3Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
-      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
-    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
-    fragment3: OpenApiFragmentValue<F3Req, F3Res> &
-      OpenApiShapeConflict<
-        Req & F1Req & F2Req,
-        F3Req,
-        Res & F1Res & F2Res,
-        F3Res
-      >,
-  ): OpenApiFragmentValue<
-    Req & F1Req & F2Req & F3Req,
-    Res & F1Res & F2Res & F3Res,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          HonoOpenApiMiddlewareEnv<Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-          HonoOpenApiMiddlewareEnv<F3Res>,
-        ]
-      >,
-      P,
-      MergeRequestValues<
-        MergeRequestValues<
-          MergeRequestValues<Values<Req>, Values<F1Req>>,
-          Values<F2Req>
-        >,
-        Values<F3Req>
-      >,
-      | OperationResponseTypes<Res>
-      | OperationResponseTypes<F1Res>
-      | OperationResponseTypes<F2Res>
-      | OperationResponseTypes<F3Res>
-    >
-  >;
-
+export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<undefined> {
   <
     // oxlint-disable-next-line no-explicit-any
     X1 extends HandlerResponse<any>,
@@ -552,33 +649,40 @@ type ConflictingKeys<Req, FReq> = {
         : K;
 }[keyof Req & keyof FReq];
 
-type ObjectShape<T> = T extends z.ZodObject<infer Shape> ? Shape : never;
+// Index the shape instead of inferring it: for an intersection of ZodObjects,
+// inference chooses one constituent and loses the other object's properties.
+type ObjectShape<T> = T extends z.ZodObject ? T['shape'] : never;
 type PropertyConflicts<A, B> = {
   [K in keyof A & keyof B]: Equal<z.output<A[K]>, z.output<B[K]>> extends true
     ? never
     : K;
 }[keyof A & keyof B];
-type ConflictingRequestKeys<Req, FReq> = {
-  [K in keyof Req & keyof FReq]: ObjectShape<
-    Extract<SchemaOfTarget<Req[K]>, AnyZodSchema>
-  > extends infer A
-    ? [A] extends [never]
-      ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
-        ? never
-        : K
-      : ObjectShape<
-            Extract<SchemaOfTarget<FReq[K]>, AnyZodSchema>
-          > extends infer B
-        ? [B] extends [never]
-          ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
-            ? never
-            : K
-          : PropertyConflicts<A, B> extends never
-            ? never
-            : `${K & string}.${PropertyConflicts<A, B> & string}`
-        : never
-    : never;
-}[keyof Req & keyof FReq];
+// Distribute over each schema declaration; intersections hide object properties from `keyof`.
+type ConflictingRequestKeys<Req, FReq> = FReq extends unknown
+  ? Req extends unknown
+    ? {
+        [K in keyof Req & keyof FReq]: ObjectShape<
+          Extract<SchemaOfTarget<Req[K]>, AnyZodSchema>
+        > extends infer A
+          ? [A] extends [never]
+            ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
+              ? never
+              : K
+            : ObjectShape<
+                  Extract<SchemaOfTarget<FReq[K]>, AnyZodSchema>
+                > extends infer B
+              ? [B] extends [never]
+                ? ConflictingKeys<Pick<Req, K>, Pick<FReq, K>> extends never
+                  ? never
+                  : K
+                : PropertyConflicts<A, B> extends never
+                  ? never
+                  : `${K & string}.${PropertyConflicts<A, B> & string}`
+              : never
+          : never;
+      }[keyof Req & keyof FReq]
+    : never
+  : never;
 
 type DeclaredResponseSchema<T> = ExtractResponseSchema<T>;
 type SameResponseSchema<A, B> = [DeclaredResponseSchema<A>] extends [never]
@@ -689,135 +793,9 @@ export type FragmentEnv<
  * `TypedResponse` by the passed middleware are merged into the route's Hono RPC
  * client schema.
  */
-export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-  ): OpenApiFragmentValue<
-    Req,
-    Res,
-    MiddlewareHandler<
-      FragmentEnv<RouteEnv, Res>,
-      P,
-      Values<Req>,
-      OperationResponseTypes<Res>
-    >
-  >;
-
-  <
-    FReq extends HonoOpenApiRequestSchemas,
-    FRes extends HonoOpenApiResponses,
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
-      OpenApiShapeConflict<Req, FReq, Res, FRes>,
-  ): OpenApiFragmentValue<
-    Req & FReq,
-    Res & FRes,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [FragmentEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
-      >,
-      P,
-      MergeRequestValues<Values<Req>, Values<FReq>>,
-      OperationResponseTypes<Res> | OperationResponseTypes<FRes>
-    >
-  >;
-
-  /** Compose two fragments, checking conflicts against the accumulated shape. */
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
-      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
-    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
-  ): OpenApiFragmentValue<
-    Req & F1Req & F2Req,
-    Res & F1Res & F2Res,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          FragmentEnv<RouteEnv, Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-        ]
-      >,
-      P,
-      MergeRequestValues<
-        MergeRequestValues<Values<Req>, Values<F1Req>>,
-        Values<F2Req>
-      >,
-      | OperationResponseTypes<Res>
-      | OperationResponseTypes<F1Res>
-      | OperationResponseTypes<F2Res>
-    >
-  >;
-
-  /** Compose three fragments, checking conflicts against the accumulated shape. */
-  <
-    Req extends HonoOpenApiRequestSchemas,
-    P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-    F3Req extends HonoOpenApiRequestSchemas,
-    F3Res extends HonoOpenApiResponses,
-  >(
-    operation: HonoOpenApiOperation<Req, Res>,
-    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
-      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
-    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
-    fragment3: OpenApiFragmentValue<F3Req, F3Res> &
-      OpenApiShapeConflict<
-        Req & F1Req & F2Req,
-        F3Req,
-        Res & F1Res & F2Res,
-        F3Res
-      >,
-  ): OpenApiFragmentValue<
-    Req & F1Req & F2Req & F3Req,
-    Res & F1Res & F2Res & F3Res,
-    MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          FragmentEnv<RouteEnv, Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-          HonoOpenApiMiddlewareEnv<F3Res>,
-        ]
-      >,
-      P,
-      MergeRequestValues<
-        MergeRequestValues<
-          MergeRequestValues<Values<Req>, Values<F1Req>>,
-          Values<F2Req>
-        >,
-        Values<F3Req>
-      >,
-      | OperationResponseTypes<Res>
-      | OperationResponseTypes<F1Res>
-      | OperationResponseTypes<F2Res>
-      | OperationResponseTypes<F3Res>
-    >
-  >;
-
+export interface HonoOpenApiFragmentMiddleware<
+  RouteEnv extends Env,
+> extends HonoOpenApiCompositionMiddleware<RouteEnv> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,

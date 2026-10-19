@@ -6,7 +6,10 @@ import type { InferRequestType } from 'hono/client';
 import { describe, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
 import { createOpenApiFragment, openApi } from './openApi.ts';
-import type { OpenApiShapeConflictDetails } from './types.ts';
+import type {
+  OpenApiFragmentValue,
+  OpenApiShapeConflictDetails,
+} from './types.ts';
 
 interface AppBindings {
   SESSIONS: Map<string, string>;
@@ -687,6 +690,82 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
     expectTypeOf(run).not.toBeUndefined();
   });
 
+  it('merges request targets of a fragment that already merged fragments', () => {
+    const errorEnvelope = z.object({ code: z.string(), message: z.string() });
+    const additionalHeader = openApiFragment(
+      {
+        request: {
+          header: z.object({ additionalHeaderField: z.string().optional() }),
+        },
+        responses: {
+          400: z.object({ status: z.boolean(), errors: errorEnvelope }),
+        },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    // Each declaration lives on a different fragment, so the composed
+    // middleware exposes a union of request schemas until the validated value
+    // is computed.
+    const nestedJwtMiddleware = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            authorization: z.string().startsWith('Bearer ').optional(),
+          }),
+        },
+        responses: { 401: errorEnvelope },
+      },
+      additionalHeader,
+      async (c, next) => {
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          additionalHeaderField?: string | undefined;
+        }>();
+        await next();
+      },
+    );
+
+    const routes = new Hono<AppEnv>().get(
+      '/me',
+      openApi(
+        {
+          // the route redeclares neither header field
+          request: { header: z.object({}) },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        nestedJwtMiddleware,
+      ),
+      (c) => {
+        const { authorization, additionalHeaderField } = c.req.valid('header');
+        expectTypeOf(authorization).toEqualTypeOf<string | undefined>();
+        expectTypeOf(additionalHeaderField).toEqualTypeOf<string | undefined>();
+        return c.var.res(200, { ok: true });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.me.$get({
+        header: {
+          authorization: 'Bearer token',
+          additionalHeaderField: 'extra',
+        },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+
   it('composes multiple fragments with merged request and response inference', () => {
     const routes = new Hono<AppEnv>().get(
       '/me',
@@ -802,6 +881,197 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
         { responses: { 200: z.object({ ok: z.boolean() }) } },
         jwtMiddleware,
         duplicateAuthorization,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
+
+  it('reports request conflicts against a fragment whose request schemas were merged', () => {
+    const errorEnvelope = z.object({
+      code: z.string(),
+      message: z.string(),
+    });
+    const additionalHeader = openApiFragment({
+      request: {
+        header: z.object({ additionalHeaderField: z.string().optional() }),
+      },
+      responses: {},
+    });
+    const combinedJwtMiddleware = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            authorization: z.string().startsWith('Bearer ').optional(),
+          }),
+        },
+        responses: { 401: errorEnvelope },
+      },
+      additionalHeader,
+    );
+
+    const invalid = () =>
+      openApi(
+        {
+          request: { header: z.object({ authorization: z.number() }) },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        // @ts-expect-error header.authorization conflicts with the combined fragment
+        combinedJwtMiddleware,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
+
+  it('checks property conflicts when composed metadata is an intersection', () => {
+    type AuthorizationRequest = {
+      header: z.ZodObject<{
+        authorization: z.ZodOptional<z.ZodString>;
+      }>;
+    };
+    type AdditionalHeaderRequest = {
+      header: z.ZodObject<{
+        additionalHeaderField: z.ZodOptional<z.ZodString>;
+      }>;
+    };
+    type MiddlewareResponses = {
+      401: z.ZodObject<{ message: z.ZodString }>;
+    };
+    type ConflictDetails = OpenApiShapeConflictDetails<
+      { header: z.ZodObject<{ authorization: z.ZodNumber }> },
+      AuthorizationRequest & AdditionalHeaderRequest,
+      { 200: z.ZodObject<{ ok: z.ZodBoolean }> },
+      MiddlewareResponses
+    >;
+    expectTypeOf<ConflictDetails>().toEqualTypeOf<'request property "header.authorization" has an incompatible schema'>();
+
+    const assertConflict = (
+      middleware: OpenApiFragmentValue<
+        AuthorizationRequest & AdditionalHeaderRequest,
+        MiddlewareResponses
+      >,
+    ) => {
+      const invalid = () =>
+        openApiFragment(
+          {
+            request: {
+              header: z.object({ authorization: z.number() }),
+            },
+            responses: { 200: z.object({ ok: z.boolean() }) },
+          },
+          // @ts-expect-error authorization conflicts with the intersected metadata
+          middleware,
+        );
+      expectTypeOf(invalid).not.toBeUndefined();
+
+      // Distinct properties from both declarations still merge successfully.
+      openApiFragment(
+        {
+          request: {
+            header: z.object({
+              authorization: z.string().optional(),
+              additionalHeaderField: z.string().optional(),
+            }),
+          },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        middleware,
+      );
+    };
+    expectTypeOf(assertConflict).not.toBeUndefined();
+  });
+
+  it('checks request conflicts when fragment and inline middleware are composed together', () => {
+    const errorEnvelope = z.object({
+      code: z.string(),
+      message: z.string(),
+    });
+    const badRequestEnvelope = z.object({
+      status: z.boolean(),
+      errors: errorEnvelope,
+    });
+    const additionalHeader = openApiFragment({
+      request: {
+        header: z.object({ additionalHeaderField: z.string().optional() }),
+      },
+      responses: { 400: badRequestEnvelope },
+    });
+    const composedJwtMiddleware = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            authorization: z.string().startsWith('Bearer ').optional(),
+          }),
+        },
+        responses: {
+          401: errorEnvelope,
+          400: badRequestEnvelope,
+          default: errorEnvelope,
+        },
+      },
+      additionalHeader,
+      async (c, next) => {
+        expectTypeOf(c.req.valid('header').authorization).toEqualTypeOf<
+          string | undefined
+        >();
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          additionalHeaderField?: string | undefined;
+        }>();
+        expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+        await next();
+      },
+    );
+    const route = new Hono<AppEnv>().get(
+      '/me',
+      openApiFragment(
+        {
+          request: {
+            header: z.object({
+              authorization: z.string().optional(),
+              additionalHeaderField: z.string().optional(),
+            }),
+          },
+          responses: {
+            200: z.object({ ok: z.boolean() }),
+            401: errorEnvelope,
+          },
+        },
+        composedJwtMiddleware,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          additionalHeaderField?: string | undefined;
+        }>();
+        return c.var.res(200, { ok: true });
+      },
+    );
+    const client = hc<typeof route>('/');
+    const run = async () => {
+      const response = await client.me.$get({
+        header: {
+          authorization: 'Bearer token',
+          additionalHeaderField: 'trace',
+        },
+      });
+      if (response.status === 200) {
+        expectTypeOf(await response.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (response.status === 401) {
+        expectTypeOf(await response.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+
+    const invalid = () =>
+      openApiFragment(
+        {
+          request: { header: z.object({ authorization: z.number() }) },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        // @ts-expect-error header.authorization conflicts with the nested fragment
+        composedJwtMiddleware,
       );
     expectTypeOf(invalid).not.toBeUndefined();
   });
