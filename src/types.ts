@@ -117,6 +117,33 @@ export type Values<T extends HonoOpenApiRequestSchemas> = ToValidatorValues<
   GetValidationSchemas<T>
 >;
 
+type MergeValueTarget<A, B> =
+  A extends Record<string, never>
+    ? B
+    : B extends Record<string, never>
+      ? A
+      : A & B;
+
+type MergeValueMaps<A, B> = Clean<{
+  [K in keyof A | keyof B]: K extends keyof A
+    ? K extends keyof B
+      ? MergeValueTarget<A[K], B[K]>
+      : A[K]
+    : K extends keyof B
+      ? B[K]
+      : never;
+}>;
+
+/** Merge validated inputs/outputs by target, ignoring empty object schemas. */
+type MergeRequestValues<A, B> = A extends { in: infer AIn; out: infer AOut }
+  ? B extends { in: infer BIn; out: infer BOut }
+    ? {
+        in: MergeValueMaps<AIn, BIn>;
+        out: MergeValueMaps<AOut, BOut>;
+      }
+    : never
+  : never;
+
 export type ZodValidatorFn = <
   S extends z.ZodType,
   T extends keyof ValidationTargets,
@@ -216,8 +243,9 @@ export interface HonoOpenApiMiddleware {
   /**
    * Compose a previously created `openApi` fragment into this operation.
    * Request object properties are merged; overlapping properties with a
-   * different output schema are rejected. Response statuses cannot be
-   * redeclared. The combined operation validates each request target once.
+   * different output schema are rejected. A response status may be repeated
+   * only when its schema matches. The combined operation validates each
+   * request target once.
    */
   <
     Req extends HonoOpenApiRequestSchemas,
@@ -237,8 +265,96 @@ export interface HonoOpenApiMiddleware {
         [HonoOpenApiMiddlewareEnv<Res>, HonoOpenApiMiddlewareEnv<FRes>]
       >,
       P,
-      Values<Req> & Values<FReq>,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
       OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+    >
+  >;
+
+  /** Compose two fragments into an operation, checking conflicts cumulatively. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
+  ): OpenApiFragmentValue<
+    Req & F1Req & F2Req,
+    Res & F1Res & F2Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          HonoOpenApiMiddlewareEnv<Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+    >
+  >;
+
+  /** Compose three fragments into an operation, checking conflicts cumulatively. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+    F3Req extends HonoOpenApiRequestSchemas,
+    F3Res extends HonoOpenApiResponses,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req & F1Req, F2Req, Res & F1Res, F2Res>,
+    fragment3: OpenApiFragmentValue<F3Req, F3Res> &
+      OpenApiShapeConflict<
+        Req & F1Req & F2Req,
+        F3Req,
+        Res & F1Res & F2Res,
+        F3Res
+      >,
+  ): OpenApiFragmentValue<
+    Req & F1Req & F2Req & F3Req,
+    Res & F1Res & F2Res & F3Res,
+    MiddlewareHandler<
+      IntersectNonAnyTypes<
+        [
+          HonoOpenApiMiddlewareEnv<Res>,
+          HonoOpenApiMiddlewareEnv<F1Res>,
+          HonoOpenApiMiddlewareEnv<F2Res>,
+          HonoOpenApiMiddlewareEnv<F3Res>,
+        ]
+      >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<
+          MergeRequestValues<Values<Req>, Values<F1Req>>,
+          Values<F2Req>
+        >,
+        Values<F3Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+      | OperationResponseTypes<F3Res>
     >
   >;
 
@@ -464,10 +580,35 @@ type ConflictingRequestKeys<Req, FReq> = {
     : never;
 }[keyof Req & keyof FReq];
 
+type DeclaredResponseSchema<T> = ExtractResponseSchema<T>;
+type SameResponseSchema<A, B> = [DeclaredResponseSchema<A>] extends [never]
+  ? [DeclaredResponseSchema<B>] extends [never]
+    ? A extends ReferenceObject
+      ? B extends ReferenceObject
+        ? Equal<A['$ref'], B['$ref']>
+        : false
+      : false
+    : false
+  : [DeclaredResponseSchema<B>] extends [never]
+    ? false
+    : Equal<
+        z.output<Extract<DeclaredResponseSchema<A>, z.ZodType>>,
+        z.output<Extract<DeclaredResponseSchema<B>, z.ZodType>>
+      >;
+type ConflictingResponseStatuses<Res, FRes> = {
+  [Status in keyof Res & keyof FRes]: SameResponseSchema<
+    Res[Status],
+    FRes[Status]
+  > extends true
+    ? never
+    : Status;
+}[keyof Res & keyof FRes];
+
 /**
  * Whether a fragment middleware may be composed into an operation without
- * conflicting request properties or a repeated response status. Request object
- * schemas may declare disjoint properties on the same target.
+ * conflicting request properties or a repeated response status with a
+ * different schema. Request object schemas may declare disjoint properties on
+ * the same target.
  */
 export type OpenApiShapeConflicts<
   Req extends HonoOpenApiRequestSchemas,
@@ -482,7 +623,7 @@ type RequestConflictMessage<Conflict> = Conflict extends string
   ? `request property "${Conflict}" has an incompatible schema`
   : never;
 type ResponseConflictMessage<Status> = Status extends string | number
-  ? `response status "${Status}" is already declared`
+  ? `response status "${Status}" has a different schema`
   : never;
 
 export type OpenApiShapeConflictDetails<
@@ -492,7 +633,7 @@ export type OpenApiShapeConflictDetails<
   FRes extends HonoOpenApiResponses,
 > =
   | RequestConflictMessage<ConflictingRequestKeys<Req, FReq>>
-  | ResponseConflictMessage<keyof Res & keyof FRes>;
+  | ResponseConflictMessage<ConflictingResponseStatuses<Res, FRes>>;
 
 export type OpenApiShapeConflict<
   Req extends HonoOpenApiRequestSchemas,
@@ -584,7 +725,7 @@ export interface HonoOpenApiFragmentMiddleware<RouteEnv extends Env> {
         [FragmentEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
       >,
       P,
-      Values<Req> & Values<FReq>,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
       OperationResponseTypes<Res> | OperationResponseTypes<FRes>
     >
   >;

@@ -67,7 +67,7 @@ export function createOpenApiMiddleware(
         if (conflicts.length > 0) {
           throw new Error(
             `openApi(): ${conflicts.map(describeRuntimeConflict).join(', ')} conflict. ` +
-              'Request targets may add distinct properties, but a property cannot be redeclared with a different schema and a response status cannot be redeclared.',
+              'Request targets may add distinct properties; overlapping request properties and response statuses require matching schemas.',
           );
         }
         mergedOperation = mergeOperations(

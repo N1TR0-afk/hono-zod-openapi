@@ -351,9 +351,18 @@ describe('fragment conflict checking', () => {
         Record<never, never>,
         Record<never, never>,
         { 401: typeof firstHeader },
-        { 401: typeof secondHeader }
+        { 401: z.ZodNumber }
       >
-    >().toEqualTypeOf<'response status "401" is already declared'>();
+    >().toEqualTypeOf<'response status "401" has a different schema'>();
+
+    expectTypeOf<
+      OpenApiShapeConflictDetails<
+        Record<never, never>,
+        Record<never, never>,
+        { 401: typeof firstHeader },
+        { 401: typeof firstHeader }
+      >
+    >().toEqualTypeOf<never>();
   });
 
   it('different properties on the same request target merge', () => {
@@ -386,14 +395,26 @@ describe('fragment conflict checking', () => {
     expectTypeOf(invalid).not.toBeUndefined();
   });
 
-  it('response status cannot be redeclared, even with the same schema', () => {
+  it('allows a response status to be redeclared with the same schema', () => {
+    const fragment = openApi({
+      responses: { 200: z.object({ name: z.string() }) },
+    });
+
+    const composed = openApi(
+      { responses: { 200: z.object({ name: z.string() }) } },
+      fragment,
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+  });
+
+  it('rejects a response status redeclared with a different schema', () => {
     const fragment = openApi({
       responses: { 200: z.object({ name: z.string() }) },
     });
 
     const invalid = () =>
-      // @ts-expect-error response status 200 is already declared by the fragment
-      openApi({ responses: { 200: z.object({ name: z.string() }) } }, fragment);
+      // @ts-expect-error response status 200 has a different schema
+      openApi({ responses: { 200: z.object({ id: z.number() }) } }, fragment);
     expectTypeOf(invalid).not.toBeUndefined();
   });
 
@@ -487,6 +508,7 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
           description: 'Missing, malformed or expired bearer token',
           schema: z.object({ code: z.string(), message: z.string() }),
         },
+        400: z.object({ errors: z.object({ code: z.string() }) }),
         '4XX': z.any(),
         default: {
           description:
@@ -517,6 +539,127 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
       }
     },
   );
+
+  const requestIdMiddleware = openApiFragment(
+    {
+      request: {
+        header: z.object({
+          'x-request-id': z.string(),
+        }),
+      },
+      responses: {
+        400: z.object({ errors: z.object({ code: z.string() }) }),
+        403: z.object({ code: z.string() }),
+      },
+    },
+    async (_c, next) => {
+      await next();
+    },
+  );
+  const traceMiddleware = openApiFragment(
+    {
+      request: {
+        header: z.object({
+          'x-trace-id': z.string(),
+        }),
+      },
+      responses: {
+        422: z.object({ error: z.string() }),
+      },
+    },
+    async (_c, next) => {
+      await next();
+    },
+  );
+
+  it('composes multiple fragments with merged request and response inference', () => {
+    const routes = new Hono<AppEnv>().get(
+      '/me',
+      openApi(
+        {
+          request: {
+            header: z.object({}),
+          },
+          responses: {
+            200: z.object({ ok: z.boolean() }),
+          },
+        },
+        jwtMiddleware,
+        requestIdMiddleware,
+        traceMiddleware,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          'x-request-id': string;
+          'x-trace-id': string;
+        }>();
+        expectTypeOf(c.get('jwtPayload')).toEqualTypeOf<unknown>();
+        return c.var.res(200, { ok: true });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.me.$get({
+        header: {
+          authorization: 'Bearer token',
+          'x-request-id': 'request-id',
+          'x-trace-id': 'trace-id',
+        },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+      if (res.status === 400) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          errors: { code: string };
+        }>();
+      }
+      if (res.status === 403) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ code: string }>();
+      }
+      if (res.status === 422) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ error: string }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('reports response conflicts between fragments', () => {
+    const duplicate400 = openApiFragment({
+      responses: { 400: z.object({ code: z.string() }) },
+    });
+    const invalid = () =>
+      // @ts-expect-error response status 400 has a different schema
+      openApi(
+        { responses: { 200: z.object({ ok: z.boolean() }) } },
+        jwtMiddleware,
+        duplicate400,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
+
+  it('reports request property conflicts between fragments', () => {
+    const duplicateAuthorization = openApiFragment({
+      request: { header: z.object({ authorization: z.number() }) },
+      responses: {},
+    });
+    const invalid = () =>
+      // @ts-expect-error header.authorization has incompatible schemas
+      openApi(
+        { responses: { 200: z.object({ ok: z.boolean() }) } },
+        jwtMiddleware,
+        duplicateAuthorization,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
 
   it('mismatched 401 payload and required-vs-optional header are rejected', () => {
     const routeMw = () =>

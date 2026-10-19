@@ -155,7 +155,7 @@ export function createOpenApiDocument<
           const details = conflicts.map(describeRuntimeConflict).join(', ');
           throw new Error(
             `${routeKey}: ${details} conflict along the same route chain. ` +
-              'Request targets may add distinct properties, but a property cannot be redeclared with a different schema and a response status cannot be redeclared.',
+              'Request targets may add distinct properties; overlapping request properties and response statuses require matching schemas.',
           );
         }
       }

@@ -132,6 +132,67 @@ const schemaShape = (schema: z.ZodType): unknown =>
 const outputsEqual = (first: z.ZodType, second: z.ZodType): boolean =>
   JSON.stringify(schemaShape(first)) === JSON.stringify(schemaShape(second));
 
+const schemasOfResponse = (response: unknown): z.ZodType[] | null => {
+  if (response instanceof z.ZodType) return [response];
+  if (!response || typeof response !== 'object') return null;
+
+  if ('schema' in response && response.schema instanceof z.ZodType) {
+    return [response.schema];
+  }
+
+  if (
+    'content' in response &&
+    response.content &&
+    typeof response.content === 'object'
+  ) {
+    const schemas: z.ZodType[] = [];
+    for (const content of Object.values(response.content)) {
+      if (
+        !content ||
+        typeof content !== 'object' ||
+        !('schema' in content) ||
+        !(content.schema instanceof z.ZodType)
+      ) {
+        return null;
+      }
+      schemas.push(content.schema);
+    }
+    return schemas.length > 0 ? schemas : null;
+  }
+
+  return null;
+};
+
+const sameResponseSchema = (first: unknown, second: unknown): boolean => {
+  const firstSchemas = schemasOfResponse(first);
+  const secondSchemas = schemasOfResponse(second);
+  if (!firstSchemas || !secondSchemas) {
+    const firstRef =
+      first && typeof first === 'object' && '$ref' in first
+        ? first.$ref
+        : undefined;
+    const secondRef =
+      second && typeof second === 'object' && '$ref' in second
+        ? second.$ref
+        : undefined;
+    return typeof firstRef === 'string' && firstRef === secondRef;
+  }
+  if (firstSchemas.length !== secondSchemas.length) {
+    return false;
+  }
+
+  const firstShapes = firstSchemas.map((schema) =>
+    JSON.stringify(schemaShape(schema)),
+  );
+  const secondShapes = secondSchemas.map((schema) =>
+    JSON.stringify(schemaShape(schema)),
+  );
+  // Content member order does not change the response's schema set.
+  firstShapes.sort();
+  secondShapes.sort();
+  return firstShapes.every((shape, index) => shape === secondShapes[index]);
+};
+
 const conflictingRequestTargets = (
   first: HonoOpenApiRequestSchemas,
   second: HonoOpenApiRequestSchemas,
@@ -185,8 +246,9 @@ const conflictingResponseKeys = (
     keyof HonoOpenApiResponses & string
   >) {
     if (!(status in second)) continue;
-
-    conflicts.push(status);
+    if (!sameResponseSchema(first[status], second[status])) {
+      conflicts.push(status);
+    }
   }
 
   return conflicts;
@@ -228,5 +290,5 @@ export const describeRuntimeConflict = (
   conflict: OpenApiRuntimeConflict,
 ): string =>
   conflict.kind === 'request'
-    ? `request property '${conflict.key}'`
-    : `response status '${conflict.key}'`;
+    ? `request property '${conflict.key}' has a different schema`
+    : `response status '${conflict.key}' has a different schema`;

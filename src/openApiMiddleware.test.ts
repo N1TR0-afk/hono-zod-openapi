@@ -484,7 +484,7 @@ describe('createOpenApiFragment', () => {
 });
 
 describe('openApi fragment merging', () => {
-  it('rejects nested request property conflicts and response redeclarations at runtime', () => {
+  it('rejects nested request property and response schema conflicts at runtime', () => {
     const fragment = openApi({
       request: { header: z.object({ authorization: z.string() }) },
       responses: { 401: z.object({ message: z.string() }) },
@@ -503,11 +503,18 @@ describe('openApi fragment merging', () => {
 
     expect(() =>
       openApi(
-        { responses: { 401: z.object({ message: z.string() }) } },
-        // @ts-expect-error response status is already declared
+        { responses: { 401: z.object({ message: z.number() }) } },
+        // @ts-expect-error response status has a different schema
         fragment,
       ),
     ).toThrow(/response status '401'/);
+
+    expect(() =>
+      openApi(
+        { responses: { 401: z.object({ message: z.string() }) } },
+        fragment,
+      ),
+    ).not.toThrow();
   });
 
   it('merges disjoint properties within request targets for validation and docs', async () => {
@@ -569,6 +576,102 @@ describe('openApi fragment merging', () => {
         'name' in parameter ? parameter.name : undefined,
       ),
     ).toEqual(expect.arrayContaining(['authorization', 'x-request-id']));
+  });
+
+  it('merges multiple fragments once and preserves middleware order', async () => {
+    const order: string[] = [];
+    const authFragment = openApi(
+      {
+        request: {
+          header: z.object({ authorization: z.string() }),
+        },
+        responses: {
+          400: z.object({ message: z.string() }),
+          401: z.object({ message: z.string() }),
+        },
+      },
+      async (_c, next) => {
+        order.push('auth-before');
+        await next();
+        order.push('auth-after');
+      },
+    );
+    const requestIdFragment = openApi(
+      {
+        request: {
+          header: z.object({ 'x-request-id': z.string().min(1) }),
+        },
+        responses: { 400: z.object({ message: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('request-id-before');
+        await next();
+        order.push('request-id-after');
+      },
+    );
+    const app = new Hono().post(
+      '/tasks',
+      openApi(
+        {
+          request: {
+            json: z.object({ title: z.string() }),
+          },
+          responses: { 201: z.object({ title: z.string() }) },
+        },
+        authFragment,
+        requestIdFragment,
+      ),
+      (c) => {
+        order.push('handler');
+        return c.var.res(201, { title: c.req.valid('json').title });
+      },
+    );
+
+    const response = await app.request('/tasks', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'x-request-id': 'req-1',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'task' }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ title: 'task' });
+    expect(order).toEqual([
+      'auth-before',
+      'request-id-before',
+      'handler',
+      'request-id-after',
+      'auth-after',
+    ]);
+
+    order.length = 0;
+    const invalidResponse = await app.request('/tasks', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'task' }),
+    });
+    expect(invalidResponse.status).toBe(400);
+    expect(order).toEqual([]);
+
+    const document = createOpenApiDocument(
+      app,
+      { info: { title: 'Test', version: '1.0.0' } },
+      { addRoute: false },
+    );
+    const operation = document.paths?.['/tasks']?.post;
+    expect(
+      operation?.parameters?.map((parameter) =>
+        'name' in parameter ? parameter.name : undefined,
+      ),
+    ).toEqual(expect.arrayContaining(['authorization', 'x-request-id']));
+    expect(Object.keys(operation?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '401', '400']),
+    );
   });
 
   it('keeps validate:false request properties documented but out of runtime validation', async () => {
@@ -697,7 +800,7 @@ describe('openApi fragment merging', () => {
     expect(Object.keys(post?.responses ?? {})).toEqual(['200', '401']);
   });
 
-  it('stacked fragments: response statuses cannot be redeclared', () => {
+  it('stacked fragments: matching response schemas can be redeclared', () => {
     const sameSchema = z.object({ name: z.string() });
 
     const first = openApi({
@@ -712,6 +815,23 @@ describe('openApi fragment merging', () => {
 
     const app = new Hono().get('/user', first, second, (c) =>
       c.json(c.req.valid('json'), 200),
+    );
+
+    const document = createOpenApiDocument(app, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+    expect(document.paths?.['/user']?.get?.responses?.['200']).toBeDefined();
+  });
+
+  it('stacked fragments: different response schemas conflict', () => {
+    const first = openApi({
+      responses: { 200: z.object({ name: z.string() }) },
+    });
+    const second = openApi({
+      responses: { 200: z.object({ id: z.number() }) },
+    });
+    const app = new Hono().get('/user', first, second, (c) =>
+      c.json({ name: 'John' }, 200),
     );
 
     expect(() =>

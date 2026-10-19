@@ -93,7 +93,19 @@ describe('detectOpenApiRuntimeConflicts', () => {
   });
 
   describe('response conflicts', () => {
-    it('rejects a response status redeclaration even when schemas differ', () => {
+    it('allows a response status redeclaration when schemas match', () => {
+      const schema = z.object({ message: z.string() });
+      const first: HonoOpenApiOperation = {
+        responses: { 401: schema },
+      };
+      const second: HonoOpenApiOperation = {
+        responses: { 401: z.object({ message: z.string() }) },
+      };
+
+      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
+    });
+
+    it('rejects a response status redeclaration when schemas differ', () => {
       const first: HonoOpenApiOperation = {
         responses: { 401: z.object({ message: z.string() }) },
       };
@@ -101,11 +113,34 @@ describe('detectOpenApiRuntimeConflicts', () => {
         responses: { 401: z.object({ status: z.string() }) },
       };
 
-      const conflicts = detectOpenApiRuntimeConflicts(first, second);
-      expect(conflicts).toContainEqual({ kind: 'responses', key: '401' });
+      expect(detectOpenApiRuntimeConflicts(first, second)).toContainEqual({
+        kind: 'responses',
+        key: '401',
+      });
     });
 
-    it('compares full response objects, skipping differing descriptions', () => {
+    it('allows matching response schemas with different descriptions', () => {
+      const first: HonoOpenApiOperation = {
+        responses: {
+          401: {
+            description: 'Missing bearer token',
+            schema: z.object({ code: z.string(), message: z.string() }),
+          },
+        },
+      };
+      const second: HonoOpenApiOperation = {
+        responses: {
+          401: {
+            description: 'Unauthorized',
+            schema: z.object({ code: z.string(), message: z.string() }),
+          },
+        },
+      };
+
+      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
+    });
+
+    it('rejects differing response schemas despite differing descriptions', () => {
       const first: HonoOpenApiOperation = {
         responses: {
           401: {
@@ -127,18 +162,26 @@ describe('detectOpenApiRuntimeConflicts', () => {
       expect(conflicts).toContainEqual({ kind: 'responses', key: '401' });
     });
 
-    it('rejects a doc-only wildcard status when it is redeclared', () => {
+    it('allows repeated references to the same response schema', () => {
+      const first: HonoOpenApiOperation = {
+        responses: { 401: { $ref: '#/components/responses/Unauthorized' } },
+      };
+      const second: HonoOpenApiOperation = {
+        responses: { 401: { $ref: '#/components/responses/Unauthorized' } },
+      };
+
+      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
+    });
+
+    it('allows a doc-only wildcard status when its schemas match', () => {
       const first: HonoOpenApiOperation = {
         responses: { '4XX': z.any(), default: z.object({ code: z.string() }) },
       };
       const second: HonoOpenApiOperation = {
-        responses: { '4XX': z.object({ code: z.string() }) },
+        responses: { '4XX': z.any() },
       };
 
-      expect(detectOpenApiRuntimeConflicts(first, second)).toContainEqual({
-        kind: 'responses',
-        key: '4XX',
-      });
+      expect(detectOpenApiRuntimeConflicts(first, second)).toEqual([]);
     });
 
     it('rejects redeclared responses without a zod schema', () => {

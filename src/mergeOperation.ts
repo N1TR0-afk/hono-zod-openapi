@@ -110,7 +110,7 @@ const mergeRequests = (
 /**
  * Merges two OpenAPI operation fragments into one.
  *
- * - `responses` merge per status code; conflict checks prevent redeclarations.
+ * - `responses` merge per status code; conflict checks reject different schemas.
  * - Request object schemas merge per property within each target.
  * - Array keys (`tags`, `security`, `parameters`, `servers`, `callbacks`)
  *   concatenate and dedupe.
