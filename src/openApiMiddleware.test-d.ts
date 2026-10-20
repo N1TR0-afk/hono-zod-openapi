@@ -49,6 +49,36 @@ const auth: MiddlewareHandler<
   await next();
 };
 
+type ForbiddenResponse = Response &
+  TypedResponse<{ reason: string }, 403, 'json'>;
+
+const forbidden: MiddlewareHandler<
+  AppEnv,
+  string,
+  Record<never, never>,
+  ForbiddenResponse
+> = async (c, next) => {
+  if (c.req.header('x-forbidden') === '1') {
+    return c.json({ reason: 'forbidden' }, 403);
+  }
+  await next();
+};
+
+type RateLimitedResponse = Response &
+  TypedResponse<{ retryAfter: number }, 429, 'json'>;
+
+const rateLimited: MiddlewareHandler<
+  AppEnv,
+  string,
+  Record<never, never>,
+  RateLimitedResponse
+> = async (c, next) => {
+  if (c.req.header('x-rate-limited') === '1') {
+    return c.json({ retryAfter: 60 }, 429);
+  }
+  await next();
+};
+
 const routes = new Hono<AppEnv>()
   .post(
     '/user',
@@ -214,6 +244,44 @@ it('handler env stays precise even with an env-mismatched middleware', () => {
     },
   );
   expectTypeOf(app).not.toBeUndefined();
+});
+
+it('accepts the maximum plain middleware overloads and merges their responses', () => {
+  const app = new Hono<AppEnv>().post(
+    '/triple',
+    openApi(
+      {
+        request: { json: z.object({ name: z.string() }) },
+        responses: { 200: z.object({ name: z.string() }) },
+      },
+      auth,
+      forbidden,
+      rateLimited,
+    ),
+    (c) => {
+      expectTypeOf(c.env.KV).toEqualTypeOf<AppBindings['KV']>();
+      expectTypeOf(c.var.userId).toEqualTypeOf<string>();
+      return c.var.res(200, { name: c.req.valid('json').name });
+    },
+  );
+
+  const client = hc<typeof app>('/');
+  const run = async () => {
+    const res = await client.triple.$post({ json: { name: 'x' } });
+    if (res.status === 200) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+    }
+    if (res.status === 401) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+    }
+    if (res.status === 403) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ reason: string }>();
+    }
+    if (res.status === 429) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ retryAfter: number }>();
+    }
+  };
+  expectTypeOf(run).not.toBeUndefined();
 });
 
 describe('createOpenApiFragment', () => {
@@ -688,6 +756,184 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
       }
     };
     expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('composes fragments followed by an inline middleware', () => {
+    const errorEnvelope = z.object({ code: z.string(), message: z.string() });
+    const headerFragment = openApiFragment(
+      {
+        request: {
+          header: z.object({ additionalHeaderField: z.string().optional() }),
+        },
+        responses: { 400: errorEnvelope },
+      },
+      async (c, next) => {
+        expectTypeOf(c.req.valid('header').additionalHeaderField).toEqualTypeOf<
+          string | undefined
+        >();
+        await next();
+      },
+    );
+    const bodyFragment = openApiFragment(
+      {
+        request: { json: z.object({ name: z.string().optional() }) },
+        responses: {},
+      },
+      async (c, next) => {
+        expectTypeOf(c.req.valid('json').name).toEqualTypeOf<
+          string | undefined
+        >();
+        await next();
+      },
+    );
+
+    // Two reusable fragments followed by inline middleware: the inline
+    // middleware sees every fragment's request target, not only the
+    // operation's own declaration.
+    const composed = openApiFragment(
+      {
+        request: {
+          header: z.object({
+            authorization: z.string().startsWith('Bearer ').optional(),
+          }),
+        },
+        responses: { 401: errorEnvelope },
+      },
+      headerFragment,
+      bodyFragment,
+      async (c, next) => {
+        const { authorization, additionalHeaderField } = c.req.valid('header');
+        expectTypeOf(authorization).toEqualTypeOf<string | undefined>();
+        expectTypeOf(additionalHeaderField).toEqualTypeOf<string | undefined>();
+        expectTypeOf(c.req.valid('json').name).toEqualTypeOf<
+          string | undefined
+        >();
+        expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+        expectTypeOf(c.var.res(401, { code: 'x', message: 'y' })).toEqualTypeOf<
+          Response & TypedResponse<{ code: string; message: string }, 401>
+        >();
+        // @ts-expect-error unknown header fields are rejected
+        const _unknownHeader = c.req.valid('header').unknownHeader;
+        await next();
+      },
+    );
+
+    const routes = new Hono<AppEnv>().post(
+      '/me',
+      openApi(
+        {
+          // the route redeclares none of the fragments' request targets
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        composed,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          additionalHeaderField?: string | undefined;
+        }>();
+        expectTypeOf(c.req.valid('json').name).toEqualTypeOf<
+          string | undefined
+        >();
+        return c.var.res(200, { ok: true });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.me.$post({
+        header: {
+          authorization: 'Bearer token',
+          additionalHeaderField: 'extra',
+        },
+        json: { name: 'name' },
+      });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (res.status === 400) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+
+    const invalid = () =>
+      openApiFragment(
+        {
+          request: { header: z.object({ additionalHeaderField: z.number() }) },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        // @ts-expect-error header.additionalHeaderField conflicts with the first fragment
+        headerFragment,
+        bodyFragment,
+        async (_c, next) => {
+          await next();
+        },
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
+  });
+
+  it('accepts structurally identical response schemas declared separately', () => {
+    // Separate `z.object` declarations have distinct type identities after
+    // response maps are intersected during composition. Compatibility is based
+    // on their validated shapes, not that identity.
+    const badRequest = () =>
+      z.object({
+        status: z.boolean(),
+        errors: z.object({ code: z.string() }),
+      });
+    const requestId = openApiFragment(
+      {
+        request: { header: z.object({ 'x-request-id': z.string() }) },
+        responses: { 400: badRequest() },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    const traceId = openApiFragment(
+      {
+        request: { header: z.object({ 'x-trace-id': z.string() }) },
+        responses: { 400: badRequest() },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    const composed = openApiFragment(
+      {
+        request: { header: z.object({ authorization: z.string().optional() }) },
+        responses: {
+          200: z.object({ ok: z.boolean() }),
+          400: badRequest(),
+        },
+      },
+      requestId,
+      traceId,
+      async (_c, next) => {
+        await next();
+      },
+    );
+    expectTypeOf(composed).not.toBeUndefined();
+
+    // Composing the accumulated response map into another fragment stays clean.
+    const route = openApi(
+      {
+        request: { header: z.object({}) },
+        responses: { 200: z.object({ ok: z.boolean() }) },
+      },
+      composed,
+    );
+    expectTypeOf(route).not.toBeUndefined();
   });
 
   it('merges request targets of a fragment that already merged fragments', () => {
@@ -1188,5 +1434,215 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
       }
     };
     expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('accepts the maximum inline middleware overloads on the creator', () => {
+    const app = new Hono<AppEnv>().post(
+      '/max',
+      openApiFragment(
+        {
+          request: { json: z.object({ name: z.string() }) },
+          responses: {
+            200: z.object({ name: z.string() }),
+            400: z.object({ field: z.string() }),
+            401: z.object({ message: z.string() }),
+            403: z.object({ reason: z.string() }),
+          },
+        },
+        async (c, next) => {
+          expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+          expectTypeOf(c.req.valid('json').name).toEqualTypeOf<string>();
+          // @ts-expect-error the seeded env stays precise
+          const _unknownBinding = c.env.NOT_A_BINDING;
+          if (c.req.valid('json').name === 'bad') {
+            return c.var.res(400, { field: 'name' });
+          }
+          await next();
+        },
+        async (c, next) => {
+          expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+          expectTypeOf(c.req.valid('json').name).toEqualTypeOf<string>();
+          if (c.req.valid('json').name === 'unauthorized') {
+            return c.var.res(401, { message: 'unauthorized' });
+          }
+          await next();
+        },
+        async (c, next) => {
+          expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+          expectTypeOf(c.req.valid('json').name).toEqualTypeOf<string>();
+          if (c.req.valid('json').name === 'forbidden') {
+            return c.var.res(403, { reason: 'forbidden' });
+          }
+          await next();
+        },
+      ),
+      (c) => c.var.res(200, { name: c.req.valid('json').name }),
+    );
+
+    const client = hc<typeof app>('/');
+    const run = async () => {
+      const res = await client.max.$post({ json: { name: 'x' } });
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+      }
+      if (res.status === 400) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ field: string }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+      }
+      if (res.status === 403) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ reason: string }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+  });
+
+  it('composes nested fragments through the maximum overloads', () => {
+    const errorEnvelope = z.object({ code: z.string(), message: z.string() });
+    const requestIdFragment = openApiFragment(
+      {
+        request: { header: z.object({ 'x-request-id': z.string() }) },
+        responses: { 400: errorEnvelope },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    const bodyFragment = openApiFragment(
+      {
+        request: { json: z.object({ name: z.string() }) },
+        responses: {},
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    // Level 1: two fragments followed by inline middleware (mixed maximum).
+    const inner = openApiFragment(
+      {
+        request: { header: z.object({ authorization: z.string().optional() }) },
+        responses: { 401: errorEnvelope },
+      },
+      requestIdFragment,
+      bodyFragment,
+      async (c, next) => {
+        expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+        expectTypeOf(c.req.valid('header')).toMatchTypeOf<{
+          authorization?: string | undefined;
+          'x-request-id': string;
+        }>();
+        expectTypeOf(c.req.valid('json').name).toEqualTypeOf<string>();
+        await next();
+      },
+    );
+
+    const traceFragment = openApiFragment(
+      {
+        request: { header: z.object({ 'x-trace-id': z.string() }) },
+        responses: { 403: errorEnvelope },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    // Level 2: the nested fragment plus another fragment and inline middleware.
+    const outer = openApiFragment(
+      {
+        request: { header: z.object({ 'x-client-id': z.string() }) },
+        responses: { 200: z.object({ ok: z.boolean() }) },
+      },
+      inner,
+      traceFragment,
+      async (c, next) => {
+        const header = c.req.valid('header');
+        expectTypeOf(header).toMatchTypeOf<{
+          authorization?: string | undefined;
+          'x-request-id': string;
+          'x-trace-id': string;
+          'x-client-id': string;
+        }>();
+        expectTypeOf(c.req.valid('json').name).toEqualTypeOf<string>();
+        expectTypeOf(c.env.JWT_SECRET).toEqualTypeOf<string>();
+        await next();
+      },
+    );
+
+    // Level 3: compose the nested fragment into a route.
+    const routes = new Hono<AppEnv>().post(
+      '/deep',
+      openApi(
+        {
+          request: { json: z.object({ extra: z.boolean() }) },
+          responses: { 201: z.object({ created: z.boolean() }) },
+        },
+        outer,
+      ),
+      (c) => {
+        const header = c.req.valid('header');
+        expectTypeOf(header).toMatchTypeOf<{
+          authorization?: string | undefined;
+          'x-request-id': string;
+          'x-trace-id': string;
+          'x-client-id': string;
+        }>();
+        expectTypeOf(c.req.valid('json')).toMatchTypeOf<{
+          name: string;
+          extra: boolean;
+        }>();
+        return c.var.res(201, { created: true });
+      },
+    );
+
+    const client = hc<typeof routes>('/');
+    const run = async () => {
+      const res = await client.deep.$post({
+        header: {
+          authorization: 'Bearer token',
+          'x-request-id': 'req',
+          'x-trace-id': 'trace',
+          'x-client-id': 'client',
+        },
+        json: { name: 'name', extra: true },
+      });
+      if (res.status === 201) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ created: boolean }>();
+      }
+      if (res.status === 200) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{ ok: boolean }>();
+      }
+      if (res.status === 400) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+      if (res.status === 401) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+      if (res.status === 403) {
+        expectTypeOf(await res.json()).toEqualTypeOf<{
+          code: string;
+          message: string;
+        }>();
+      }
+    };
+    expectTypeOf(run).not.toBeUndefined();
+
+    const invalid = () =>
+      openApiFragment(
+        {
+          request: {
+            header: z.object({ 'x-request-id': z.number() }),
+          },
+          responses: { 200: z.object({ ok: z.boolean() }) },
+        },
+        // @ts-expect-error x-request-id conflicts with the nested fragment
+        outer,
+      );
+    expectTypeOf(invalid).not.toBeUndefined();
   });
 });

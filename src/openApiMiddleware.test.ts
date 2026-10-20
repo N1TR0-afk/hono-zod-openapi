@@ -481,6 +481,84 @@ describe('createOpenApiFragment', () => {
     );
     expect(post?.requestBody && 'content' in post.requestBody).toBe(true);
   });
+
+  it('runs the maximum inline middleware overloads in order and stops on an early response', async () => {
+    const order: string[] = [];
+    const app = new Hono<FragmentEnv>().post(
+      '/max-inline',
+      openApiFragment(
+        {
+          request: { json: z.object({ name: z.string() }) },
+          responses: { 200: z.object({ name: z.string() }) },
+        },
+        async (_c, next) => {
+          order.push('one-before');
+          await next();
+          order.push('one-after');
+        },
+        async (_c, next) => {
+          order.push('two-before');
+          await next();
+          order.push('two-after');
+        },
+        async (c, next) => {
+          order.push('three-before');
+          if (c.req.valid('json').name === 'blocked') {
+            return c.json({ blocked: true }, 403);
+          }
+          expect(c.req.valid('json').name).toBe('allowed');
+          await next();
+          order.push('three-after');
+        },
+      ),
+      (c) => {
+        order.push('handler');
+        return c.var.res(200, { name: c.req.valid('json').name });
+      },
+    );
+
+    const ok = await app.request('/max-inline', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'allowed' }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ name: 'allowed' });
+    expect(order).toEqual([
+      'one-before',
+      'two-before',
+      'three-before',
+      'handler',
+      'three-after',
+      'two-after',
+      'one-after',
+    ]);
+
+    order.length = 0;
+    const blocked = await app.request('/max-inline', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'blocked' }),
+    });
+    expect(blocked.status).toBe(403);
+    expect(await blocked.json()).toEqual({ blocked: true });
+    expect(order).toEqual([
+      'one-before',
+      'two-before',
+      'three-before',
+      'two-after',
+      'one-after',
+    ]);
+
+    order.length = 0;
+    const invalid = await app.request('/max-inline', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 123 }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(order).toEqual([]);
+  });
 });
 
 describe('openApi fragment merging', () => {
@@ -671,6 +749,281 @@ describe('openApi fragment merging', () => {
     ).toEqual(expect.arrayContaining(['authorization', 'x-request-id']));
     expect(Object.keys(operation?.responses ?? {})).toEqual(
       expect.arrayContaining(['201', '401', '400']),
+    );
+  });
+
+  it('runs two composed fragments and an inline middleware with merged request targets', async () => {
+    const order: string[] = [];
+    const headerFragment = openApi(
+      {
+        request: {
+          header: z.object({ 'x-request-id': z.string().min(1) }),
+        },
+        responses: { 400: z.object({ message: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('header-before');
+        await next();
+        order.push('header-after');
+      },
+    );
+    const bodyFragment = openApi(
+      {
+        request: {
+          json: z.object({ title: z.string() }),
+        },
+        responses: {},
+      },
+      async (_c, next) => {
+        order.push('body-before');
+        await next();
+        order.push('body-after');
+      },
+    );
+    const app = new Hono().post(
+      '/tasks',
+      openApi(
+        {
+          responses: {
+            201: z.object({ title: z.string(), requestId: z.string() }),
+          },
+        },
+        headerFragment,
+        bodyFragment,
+        async (c, next) => {
+          order.push('inline-before');
+          // both fragments' targets are validated before the inline middleware
+          expect(c.req.valid('header')['x-request-id']).toBe('req-1');
+          expect(c.req.valid('json').title).toBe('task');
+          await next();
+          order.push('inline-after');
+        },
+      ),
+      (c) => {
+        order.push('handler');
+        return c.var.res(201, {
+          title: c.req.valid('json').title,
+          requestId: c.req.valid('header')['x-request-id'],
+        });
+      },
+    );
+
+    const response = await app.request('/tasks', {
+      method: 'POST',
+      headers: {
+        'x-request-id': 'req-1',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'task' }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({
+      title: 'task',
+      requestId: 'req-1',
+    });
+    expect(order).toEqual([
+      'header-before',
+      'body-before',
+      'inline-before',
+      'handler',
+      'inline-after',
+      'body-after',
+      'header-after',
+    ]);
+
+    order.length = 0;
+    const invalidResponse = await app.request('/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'task' }),
+    });
+    expect(invalidResponse.status).toBe(400);
+    expect(order).toEqual([]);
+
+    const document = createOpenApiDocument(
+      app,
+      { info: { title: 'Test', version: '1.0.0' } },
+      { addRoute: false },
+    );
+    const operation = document.paths?.['/tasks']?.post;
+    expect(
+      operation?.parameters?.map((parameter) =>
+        'name' in parameter ? parameter.name : undefined,
+      ),
+    ).toEqual(expect.arrayContaining(['x-request-id']));
+    expect(operation?.requestBody).toBeDefined();
+    expect(Object.keys(operation?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '400']),
+    );
+  });
+
+  it('executes nested fragments once at maximum composition arity', async () => {
+    const order: string[] = [];
+    const openApiFragment = createOpenApiFragment<AppEnv>();
+    const requestIdFragment = openApiFragment(
+      {
+        request: {
+          header: z.object({ 'x-request-id': z.string() }),
+        },
+        responses: { 400: z.object({ message: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('request-id-before');
+        await next();
+        order.push('request-id-after');
+      },
+    );
+    const bodyFragment = openApiFragment(
+      {
+        request: { json: z.object({ title: z.string() }) },
+        responses: {},
+      },
+      async (_c, next) => {
+        order.push('body-before');
+        await next();
+        order.push('body-after');
+      },
+    );
+    const inner = openApiFragment(
+      {
+        request: {
+          header: z.object({ authorization: z.string() }),
+        },
+        responses: { 401: z.object({ message: z.string() }) },
+      },
+      requestIdFragment,
+      bodyFragment,
+      async (c, next) => {
+        order.push('inner-before');
+        expect(c.req.valid('header')['x-request-id']).toBe('req-1');
+        expect(c.req.valid('json').title).toBe('task');
+        await next();
+        order.push('inner-after');
+      },
+    );
+    const traceFragment = openApiFragment(
+      {
+        request: {
+          header: z.object({ 'x-trace-id': z.string() }),
+        },
+        responses: { 403: z.object({ message: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('trace-before');
+        await next();
+        order.push('trace-after');
+      },
+    );
+    const clientIdFragment = openApiFragment(
+      {
+        request: {
+          header: z.object({ 'x-client-id': z.string() }),
+        },
+        responses: { 429: z.object({ message: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('client-id-before');
+        await next();
+        order.push('client-id-after');
+      },
+    );
+
+    const app = new Hono<AppEnv>().post(
+      '/deep',
+      openApi(
+        {
+          request: { json: z.object({ extra: z.boolean() }) },
+          responses: {
+            201: z.object({
+              title: z.string(),
+              requestId: z.string(),
+              traceId: z.string(),
+              clientId: z.string(),
+            }),
+          },
+        },
+        inner,
+        traceFragment,
+        clientIdFragment,
+      ),
+      (c) => {
+        order.push('handler');
+        return c.var.res(201, {
+          title: c.req.valid('json').title,
+          requestId: c.req.valid('header')['x-request-id'],
+          traceId: c.req.valid('header')['x-trace-id'],
+          clientId: c.req.valid('header')['x-client-id'],
+        });
+      },
+    );
+
+    const response = await app.request('/deep', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'x-request-id': 'req-1',
+        'x-trace-id': 'trace-1',
+        'x-client-id': 'client-1',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'task', extra: true }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({
+      title: 'task',
+      requestId: 'req-1',
+      traceId: 'trace-1',
+      clientId: 'client-1',
+    });
+    expect(order).toEqual([
+      'request-id-before',
+      'body-before',
+      'inner-before',
+      'trace-before',
+      'client-id-before',
+      'handler',
+      'client-id-after',
+      'trace-after',
+      'inner-after',
+      'body-after',
+      'request-id-after',
+    ]);
+
+    order.length = 0;
+    const invalidResponse = await app.request('/deep', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'x-request-id': 'req-1',
+        'x-trace-id': 'trace-1',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'task', extra: true }),
+    });
+    expect(invalidResponse.status).toBe(400);
+    expect(order).toEqual([]);
+
+    const document = createOpenApiDocument(
+      app,
+      { info: { title: 'Test', version: '1.0.0' } },
+      { addRoute: false },
+    );
+    const operation = document.paths?.['/deep']?.post;
+    expect(
+      operation?.parameters?.map((parameter) =>
+        'name' in parameter ? parameter.name : undefined,
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        'authorization',
+        'x-request-id',
+        'x-trace-id',
+        'x-client-id',
+      ]),
+    );
+    expect(operation?.requestBody).toBeDefined();
+    expect(Object.keys(operation?.responses ?? {})).toEqual(
+      expect.arrayContaining(['201', '400', '401', '403', '429']),
     );
   });
 

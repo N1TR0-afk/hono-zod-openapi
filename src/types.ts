@@ -101,6 +101,22 @@ type GetValidationSchemas<T extends HonoOpenApiRequestSchemas> = Clean<{
       : never;
 }>;
 
+/**
+ * Flattens the union of request-schema records produced by composed fragments
+ * into one record whose targets are the union of every member's declaration.
+ * Without this, targets declared by only some fragments would be dropped when
+ * `Values` indexes the union, collapsing validated values to `unknown`.
+ */
+type RequestSchemaKeys<T> = T extends unknown ? keyof T : never;
+type RequestSchemaAt<T, K> = T extends unknown
+  ? K extends keyof T
+    ? T[K]
+    : never
+  : never;
+type MergeRequestSchemaMaps<T> = Clean<{
+  [K in RequestSchemaKeys<T>]: RequestSchemaAt<T, K>;
+}>;
+
 // A target's schemas are a TypeScript union only after `openApi` fragments are
 // composed (see the composition overloads). At runtime `mergeOperations` folds
 // those schemas with `ZodObject.extend`, so the validated value is the merge of
@@ -148,7 +164,7 @@ type ToValidatorValues<T extends ValidationSchemas> = {
 };
 
 export type Values<T extends HonoOpenApiRequestSchemas> = ToValidatorValues<
-  GetValidationSchemas<T>
+  MergeRequestSchemaMaps<GetValidationSchemas<T>>
 >;
 
 type MergeValueTarget<A, B> =
@@ -341,6 +357,61 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
       P,
       MergeRequestValues<Values<Req>, Values<FReq>>,
       OperationResponseTypes<Res> | OperationResponseTypes<FRes>
+    >
+  >;
+
+  /** Compose two fragments followed by inline Hono middleware. */
+  <
+    Req extends HonoOpenApiRequestSchemas,
+    P extends string,
+    Res extends HonoOpenApiResponses,
+    F1Req extends HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses,
+    E1 extends Env,
+    X1 extends HandlerResponse<unknown>,
+    M1 extends InlineCompositionMiddleware<
+      RouteEnv,
+      Res & F1Res & F2Res,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      E1,
+      X1
+    >,
+  >(
+    operation: HonoOpenApiOperation<Req, Res>,
+    fragment1: OpenApiFragmentValue<F1Req, F1Res> &
+      OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
+    fragment2: OpenApiFragmentValue<F2Req, F2Res> &
+      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+    middleware: M1 & { [FragmentShapeSymbol]?: never },
+  ): OpenApiFragmentValue<
+    Req | F1Req | F2Req,
+    Res & F1Res & F2Res,
+    MiddlewareHandler<
+      RouteEnv extends Env
+        ? ComposedFragmentEnv<RouteEnv, Res, F1Res & F2Res>
+        : IntersectNonAnyTypes<
+            [
+              E1,
+              HonoOpenApiMiddlewareEnv<Res>,
+              HonoOpenApiMiddlewareEnv<F1Res>,
+              HonoOpenApiMiddlewareEnv<F2Res>,
+            ]
+          >,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      | OperationResponseTypes<Res>
+      | OperationResponseTypes<F1Res>
+      | OperationResponseTypes<F2Res>
+      | X1
     >
   >;
 
@@ -685,6 +756,15 @@ type ConflictingRequestKeys<Req, FReq> = FReq extends unknown
   : never;
 
 type DeclaredResponseSchema<T> = ExtractResponseSchema<T>;
+// Intersected response maps (`Res & F1Res`) produce schema intersections whose
+// exact type identity differs from a single declaration even when the validated
+// shapes are the same. Compare structural assignability in both directions so a
+// compatible redeclaration is not reported as a conflict.
+type MutuallyAssignable<A, B> = [A] extends [B]
+  ? [B] extends [A]
+    ? true
+    : false
+  : false;
 type SameResponseSchema<A, B> = [DeclaredResponseSchema<A>] extends [never]
   ? [DeclaredResponseSchema<B>] extends [never]
     ? A extends ReferenceObject
@@ -695,7 +775,7 @@ type SameResponseSchema<A, B> = [DeclaredResponseSchema<A>] extends [never]
     : false
   : [DeclaredResponseSchema<B>] extends [never]
     ? false
-    : Equal<
+    : MutuallyAssignable<
         z.output<Extract<DeclaredResponseSchema<A>, z.ZodType>>,
         z.output<Extract<DeclaredResponseSchema<B>, z.ZodType>>
       >;
