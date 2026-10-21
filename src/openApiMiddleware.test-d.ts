@@ -7,6 +7,8 @@ import { describe, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
 import { createOpenApiFragment, openApi } from './openApi.ts';
 import type {
+  HonoOpenApiMiddlewareEnv,
+  HonoOpenApiResponses,
   OpenApiFragmentValue,
   OpenApiShapeConflictDetails,
 } from './types.ts';
@@ -1644,5 +1646,154 @@ describe('creator-fragment conflict checking (createOpenApiFragment)', () => {
         outer,
       );
     expectTypeOf(invalid).not.toBeUndefined();
+  });
+});
+
+/**
+ * Regression: composing fragments used to intersect one `res` helper per
+ * fragment/operation. Calls still type-checked, but TypeScript contextual
+ * typing picked a single overload, so IntelliSense only completed payloads
+ * declared by the last operation. The helper must instead be built from the
+ * merged response map.
+ */
+describe('composed response helper', () => {
+  type CompositionEnv = {
+    Bindings: { JWT_SECRET: string };
+    Variables: { jwtPayload: unknown };
+  };
+
+  const openApiFragment = createOpenApiFragment<CompositionEnv>();
+
+  const okSchema = z.object({ ok: z.boolean() });
+  const createdSchema = z.object({ created: z.boolean() });
+  const errorSchema = z.object({ code: z.string(), message: z.string() });
+  const traceSchema = z.object({ trace: z.string() });
+  const detailSchema = z.object({ detail: z.string() });
+
+  // Extract the `res` helper from the context parameter so the assertion is
+  // independent of how the middleware's environment is built.
+  type ResOf<M> = M extends (...args: infer Args) => unknown
+    ? Args extends [infer C, ...unknown[]]
+      ? C extends { var: infer V }
+        ? V extends { res: infer R }
+          ? R
+          : never
+        : never
+      : never
+    : never;
+  type MergedRes<Res extends HonoOpenApiResponses> =
+    HonoOpenApiMiddlewareEnv<Res>['Variables']['res'];
+
+  const auth = openApiFragment(
+    { responses: { 401: errorSchema } },
+    async (_c, next) => {
+      await next();
+    },
+  );
+  const trace = openApiFragment(
+    { responses: { 403: traceSchema } },
+    async (_c, next) => {
+      await next();
+    },
+  );
+
+  it('route handlers get one res helper covering every fragment response', () => {
+    new Hono<CompositionEnv>().get(
+      '/me',
+      openApi({ responses: { 200: okSchema } }, auth),
+      (c) => {
+        expectTypeOf(c.var.res).toEqualTypeOf<
+          MergedRes<{ 200: typeof okSchema; 401: typeof errorSchema }>
+        >();
+        return c.var.res(200, { ok: true });
+      },
+    );
+
+    const middleware = openApi({ responses: { 200: okSchema } }, auth);
+    expectTypeOf<ResOf<typeof middleware>>().toEqualTypeOf<
+      MergedRes<{ 200: typeof okSchema; 401: typeof errorSchema }>
+    >();
+  });
+
+  it('compatible redeclared statuses keep the last schema usable', () => {
+    const routeErrorSchema = z.object({
+      code: z.string(),
+      message: z.string(),
+    });
+    const middleware = openApi(
+      { responses: { 200: okSchema, 401: routeErrorSchema } },
+      auth,
+    );
+
+    // The fragment's 401 is the later declaration, matching runtime
+    // `mergeOperations`, so the res helper must keep it (not an intersection of
+    // both Zod schema types).
+    expectTypeOf<ResOf<typeof middleware>>().toEqualTypeOf<
+      MergedRes<{ 200: typeof okSchema; 401: typeof errorSchema }>
+    >();
+
+    new Hono<CompositionEnv>().get('/overlap', middleware, (c) => {
+      expectTypeOf(c.var.res(401, { code: 'x', message: 'y' })).toEqualTypeOf<
+        Response & TypedResponse<{ code: string; message: string }, 401>
+      >();
+      return c.var.res(200, { ok: true });
+    });
+  });
+
+  it('three-fragment compositions merge every response map', () => {
+    const detail = openApiFragment(
+      { responses: { 400: detailSchema } },
+      async (_c, next) => {
+        await next();
+      },
+    );
+    const middleware = openApiFragment(
+      { responses: { 201: createdSchema } },
+      auth,
+      trace,
+      detail,
+    );
+    expectTypeOf<ResOf<typeof middleware>>().toEqualTypeOf<
+      MergedRes<{
+        201: typeof createdSchema;
+        401: typeof errorSchema;
+        403: typeof traceSchema;
+        400: typeof detailSchema;
+      }>
+    >();
+  });
+
+  it('inline composition middleware return the merged res helper', () => {
+    const creatorComposed = openApiFragment(
+      { responses: { 201: createdSchema } },
+      auth,
+      trace,
+      async (_c, next) => {
+        await next();
+      },
+    );
+    expectTypeOf<ResOf<typeof creatorComposed>>().toEqualTypeOf<
+      MergedRes<{
+        201: typeof createdSchema;
+        401: typeof errorSchema;
+        403: typeof traceSchema;
+      }>
+    >();
+
+    const plainComposed = openApi(
+      { responses: { 201: createdSchema } },
+      auth,
+      trace,
+      async (_c, next) => {
+        await next();
+      },
+    );
+    expectTypeOf<ResOf<typeof plainComposed>>().toEqualTypeOf<
+      MergedRes<{
+        201: typeof createdSchema;
+        401: typeof errorSchema;
+        403: typeof traceSchema;
+      }>
+    >();
   });
 });

@@ -261,13 +261,39 @@ type OperationMiddlewareEnv<
   ? FragmentEnv<RouteEnv, Res>
   : HonoOpenApiMiddlewareEnv<Res>;
 
+/**
+ * Merges accumulated response maps the same way `mergeOperations` does at
+ * runtime: statuses from `B` (the later fragment) override `A`'s.
+ * Intersecting the maps instead would turn a compatible redeclaration of a
+ * status (allowed when the payload shapes match) into an intersection of Zod
+ * schema types, which `ResponseSchemas` can no longer resolve.
+ */
+type MergeResponseMaps<
+  A extends HonoOpenApiResponses,
+  B extends HonoOpenApiResponses,
+> = Clean<{
+  [K in keyof A | keyof B]: K extends keyof B
+    ? B[K]
+    : K extends keyof A
+      ? A[K]
+      : never;
+}>;
+
+/**
+ * Environment of a fragment composed from an operation and one or more other
+ * fragments. Response maps are merged *before* building the `res` helper
+ * environment: intersecting two separate `HonoOpenApiMiddlewareEnv`s produces
+ * an intersection of `res` function types, which TypeScript accepts at call
+ * sites but cannot use for contextual typing (IntelliSense falls back to the
+ * first overload, so payload completions only show the operation's own
+ * responses). A single environment over the merged response map keeps one `res`
+ * signature covering every declared status.
+ */
 type ComposedFragmentEnv<
   RouteEnv extends Env | undefined,
   Res extends HonoOpenApiResponses,
   FRes extends HonoOpenApiResponses,
-> = IntersectNonAnyTypes<
-  [OperationMiddlewareEnv<RouteEnv, Res>, HonoOpenApiMiddlewareEnv<FRes>]
->;
+> = OperationMiddlewareEnv<RouteEnv, MergeResponseMaps<Res, FRes>>;
 
 type InlineCompositionMiddleware<
   RouteEnv extends Env | undefined,
@@ -313,7 +339,7 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     X1 extends HandlerResponse<unknown>,
     M1 extends InlineCompositionMiddleware<
       RouteEnv,
-      Res & FRes,
+      MergeResponseMaps<Res, FRes>,
       P,
       MergeRequestValues<Values<Req>, Values<FReq>>,
       E1,
@@ -326,12 +352,12 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     middleware: M1 & { [FragmentShapeSymbol]?: never },
   ): OpenApiFragmentValue<
     Req | FReq,
-    Res & FRes,
+    MergeResponseMaps<Res, FRes>,
     MiddlewareHandler<
       RouteEnv extends Env
         ? ComposedFragmentEnv<RouteEnv, Res, FRes>
         : IntersectNonAnyTypes<
-            [E1, HonoOpenApiMiddlewareEnv<Res>, HonoOpenApiMiddlewareEnv<FRes>]
+            [E1, HonoOpenApiMiddlewareEnv<MergeResponseMaps<Res, FRes>>]
           >,
       P,
       MergeRequestValues<Values<Req>, Values<FReq>>,
@@ -351,7 +377,7 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
       OpenApiShapeConflict<Req, FReq, Res, FRes>,
   ): OpenApiFragmentValue<
     Req | FReq,
-    Res & FRes,
+    MergeResponseMaps<Res, FRes>,
     MiddlewareHandler<
       ComposedFragmentEnv<RouteEnv, Res, FRes>,
       P,
@@ -373,7 +399,7 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     X1 extends HandlerResponse<unknown>,
     M1 extends InlineCompositionMiddleware<
       RouteEnv,
-      Res & F1Res & F2Res,
+      MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
       P,
       MergeRequestValues<
         MergeRequestValues<Values<Req>, Values<F1Req>>,
@@ -387,20 +413,25 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+      OpenApiShapeConflict<
+        Req | F1Req,
+        F2Req,
+        MergeResponseMaps<Res, F1Res>,
+        F2Res
+      >,
     middleware: M1 & { [FragmentShapeSymbol]?: never },
   ): OpenApiFragmentValue<
     Req | F1Req | F2Req,
-    Res & F1Res & F2Res,
+    MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
     MiddlewareHandler<
       RouteEnv extends Env
-        ? ComposedFragmentEnv<RouteEnv, Res, F1Res & F2Res>
+        ? ComposedFragmentEnv<RouteEnv, MergeResponseMaps<Res, F1Res>, F2Res>
         : IntersectNonAnyTypes<
             [
               E1,
-              HonoOpenApiMiddlewareEnv<Res>,
-              HonoOpenApiMiddlewareEnv<F1Res>,
-              HonoOpenApiMiddlewareEnv<F2Res>,
+              HonoOpenApiMiddlewareEnv<
+                MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>
+              >,
             ]
           >,
       P,
@@ -428,17 +459,19 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+      OpenApiShapeConflict<
+        Req | F1Req,
+        F2Req,
+        MergeResponseMaps<Res, F1Res>,
+        F2Res
+      >,
   ): OpenApiFragmentValue<
     Req | F1Req | F2Req,
-    Res & F1Res & F2Res,
+    MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
     MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          OperationMiddlewareEnv<RouteEnv, Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-        ]
+      OperationMiddlewareEnv<
+        RouteEnv,
+        MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>
       >,
       P,
       MergeRequestValues<
@@ -466,25 +499,32 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
-      OpenApiShapeConflict<Req | F1Req, F2Req, Res & F1Res, F2Res>,
+      OpenApiShapeConflict<
+        Req | F1Req,
+        F2Req,
+        MergeResponseMaps<Res, F1Res>,
+        F2Res
+      >,
     fragment3: OpenApiFragmentValue<F3Req, F3Res> &
       OpenApiShapeConflict<
         Req | F1Req | F2Req,
         F3Req,
-        Res & F1Res & F2Res,
+        MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
         F3Res
       >,
   ): OpenApiFragmentValue<
     Req | F1Req | F2Req | F3Req,
-    Res & F1Res & F2Res & F3Res,
+    MergeResponseMaps<
+      MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
+      F3Res
+    >,
     MiddlewareHandler<
-      IntersectNonAnyTypes<
-        [
-          OperationMiddlewareEnv<RouteEnv, Res>,
-          HonoOpenApiMiddlewareEnv<F1Res>,
-          HonoOpenApiMiddlewareEnv<F2Res>,
-          HonoOpenApiMiddlewareEnv<F3Res>,
-        ]
+      OperationMiddlewareEnv<
+        RouteEnv,
+        MergeResponseMaps<
+          MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
+          F3Res
+        >
       >,
       P,
       MergeRequestValues<
@@ -756,10 +796,10 @@ type ConflictingRequestKeys<Req, FReq> = FReq extends unknown
   : never;
 
 type DeclaredResponseSchema<T> = ExtractResponseSchema<T>;
-// Intersected response maps (`Res & F1Res`) produce schema intersections whose
-// exact type identity differs from a single declaration even when the validated
-// shapes are the same. Compare structural assignability in both directions so a
-// compatible redeclaration is not reported as a conflict.
+// Compatible redeclarations of a response status can have distinct schema type
+// identities (e.g. two separately declared `z.object` calls with the same
+// shape). Compare structural assignability in both directions so a compatible
+// redeclaration is not reported as a conflict.
 type MutuallyAssignable<A, B> = [A] extends [B]
   ? [B] extends [A]
     ? true
