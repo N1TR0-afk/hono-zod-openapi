@@ -1194,3 +1194,187 @@ describe('openApi fragment merging', () => {
     ).toThrow(/response status '200'/);
   });
 });
+
+describe('openApi without responses', () => {
+  it('validates input and runs reusable middleware when responses are omitted', async () => {
+    let middlewareRuns = 0;
+    const app = new Hono<AppEnv>().post(
+      '/user',
+      openApi(
+        {
+          request: {
+            json: z.object({ name: z.string() }),
+            header: z.object({ 'x-request-id': z.string().min(1) }),
+          },
+        },
+        auth,
+        async (_c, next) => {
+          middlewareRuns += 1;
+          await next();
+        },
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        return c.json(
+          {
+            name: c.req.valid('json').name,
+            userId: c.var.userId,
+            requestId: c.req.valid('header')['x-request-id'],
+          },
+          200,
+        );
+      },
+    );
+    const env = { SESSIONS: sessions } satisfies AppBindings;
+
+    const ok = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'valid-token',
+          'x-request-id': 'req-1',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John' }),
+      },
+      env,
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      name: 'John',
+      userId: 'user-1',
+      requestId: 'req-1',
+    });
+    expect(middlewareRuns).toBe(1);
+
+    middlewareRuns = 0;
+    const invalid = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'valid-token',
+          'x-request-id': 'req-1',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 123 }),
+      },
+      env,
+    );
+    expect(invalid.status).toBe(400);
+    expect(middlewareRuns).toBe(0);
+
+    const unauthorized = await app.request(
+      '/user',
+      {
+        method: 'POST',
+        headers: {
+          'x-request-id': 'req-1',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John' }),
+      },
+      env,
+    );
+    expect(unauthorized.status).toBe(401);
+    expect(middlewareRuns).toBe(0);
+  });
+
+  it('generates the same document as an explicit empty response map', () => {
+    const query = z.object({ id: z.string() });
+
+    const omitted = new Hono().get(
+      '/user',
+      openApi({ request: { query } }),
+      (c) => c.json({ id: c.req.valid('query').id }),
+    );
+    const explicit = new Hono().get(
+      '/user',
+      openApi({ request: { query }, responses: {} }),
+      (c) => c.json({ id: c.req.valid('query').id }),
+    );
+
+    const omittedDocument = createOpenApiDocument(omitted, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+    const explicitDocument = createOpenApiDocument(explicit, {
+      info: { title: 'Test', version: '1.0.0' },
+    });
+
+    expect(omittedDocument.paths?.['/user']?.get?.responses).toEqual({});
+    expect(omittedDocument.paths?.['/user']?.get?.responses).toEqual(
+      explicitDocument.paths?.['/user']?.get?.responses,
+    );
+  });
+
+  it('composes fragments that omit responses and merges later declarations', async () => {
+    const requestId = openApi(
+      {
+        request: {
+          header: z.object({ 'x-request-id': z.string().min(1) }),
+        },
+      },
+      async (_c, next) => {
+        await next();
+      },
+    );
+
+    const app = new Hono<AppEnv>().get(
+      '/user',
+      openApi(
+        {
+          request: { query: z.object({ id: z.string() }) },
+        },
+        auth,
+      ),
+      openApi({ responses: { 200: z.object({ id: z.string() }) } }, requestId),
+      (c) => {
+        const query = c.req.valid('query');
+        const header = c.req.valid('header');
+        return c.var.res(200, {
+          id: `${query.id}:${header['x-request-id']}`,
+        });
+      },
+    );
+    const env = { SESSIONS: sessions } satisfies AppBindings;
+
+    const ok = await app.request(
+      '/user?id=42',
+      {
+        headers: {
+          Authorization: 'valid-token',
+          'x-request-id': 'req-1',
+        },
+      },
+      env,
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ id: '42:req-1' });
+
+    const missingAuth = await app.request(
+      '/user?id=42',
+      { headers: { 'x-request-id': 'req-1' } },
+      env,
+    );
+    expect(missingAuth.status).toBe(401);
+
+    const missingHeader = await app.request(
+      '/user?id=42',
+      { headers: { Authorization: 'valid-token' } },
+      env,
+    );
+    expect(missingHeader.status).toBe(400);
+
+    const document = createOpenApiDocument(
+      app,
+      {
+        info: { title: 'Test', version: '1.0.0' },
+      },
+      { addRoute: false },
+    );
+    expect(
+      Object.keys(document.paths?.['/user']?.get?.responses ?? {}),
+    ).toEqual(['200']);
+  });
+});

@@ -19,6 +19,7 @@ import type {
   HonoOpenApiMiddleware,
   HonoOpenApiMiddlewareEnv,
   HonoOpenApiOperation,
+  HonoOpenApiOperationWithoutResponses,
   HonoOpenApiRequestSchemas,
   HonoOpenApiResponses,
   ValidationTarget,
@@ -48,13 +49,19 @@ export function createOpenApiMiddleware(
     ...middleware: Array<MiddlewareHandler<any, any, any, any>>
   ): MiddlewareHandler<HonoOpenApiMiddlewareEnv<Res>, P, Values<Req>> => {
     // absorb nested fragments into a single, merge-aware metadata payload
+    // `responses` is optional at the call site; normalize it once so the
+    // metadata, merged operation, response helper and document generation all
+    // observe an empty map instead of `undefined`.
     let mergedOperation: HonoOpenApiOperation<
       HonoOpenApiRequestSchemas,
       HonoOpenApiResponses
-    > = operation as HonoOpenApiOperation<
-      HonoOpenApiRequestSchemas,
-      HonoOpenApiResponses
-    >;
+    > =
+      operation.responses === undefined
+        ? { ...operation, responses: {} }
+        : (operation as HonoOpenApiOperation<
+            HonoOpenApiRequestSchemas,
+            HonoOpenApiResponses
+          >);
     const composedMiddleware: MiddlewareHandler[] = [];
     for (const mw of middleware) {
       // oxlint-disable-next-line typescript/no-explicit-any -- fragment detection on untyped middleware
@@ -157,12 +164,18 @@ export const openApi: HonoOpenApiMiddleware = createOpenApiMiddleware();
  * });
  * ```
  */
-export const defineOpenApiOperation = <
+export function defineOpenApiOperation<
   Req extends HonoOpenApiRequestSchemas,
   Res extends HonoOpenApiResponses,
->(
-  operation: HonoOpenApiOperation<Req, Res>,
-) => operation;
+>(operation: HonoOpenApiOperation<Req, Res>): HonoOpenApiOperation<Req, Res>;
+export function defineOpenApiOperation<Req extends HonoOpenApiRequestSchemas>(
+  operation: HonoOpenApiOperationWithoutResponses<Req>,
+): HonoOpenApiOperationWithoutResponses<Req>;
+export function defineOpenApiOperation(
+  operation: HonoOpenApiOperation | HonoOpenApiOperationWithoutResponses,
+) {
+  return operation;
+}
 
 /**
  * Creates a route-environment-aware variant of the `openApi` middleware.

@@ -5,8 +5,15 @@ import { hc } from 'hono/client';
 import type { InferRequestType } from 'hono/client';
 import { describe, expectTypeOf, it } from 'vitest';
 import * as z from 'zod';
-import { createOpenApiFragment, openApi } from './openApi.ts';
+import {
+  createOpenApiFragment,
+  defineOpenApiOperation,
+  openApi,
+} from './openApi.ts';
 import type {
+  HonoOpenApiOperation,
+  HonoOpenApiRequestSchemas,
+  HonoOpenApiResponses,
   OpenApiFragmentValue,
   OpenApiShapeConflictDetails,
 } from './types.ts';
@@ -1796,5 +1803,232 @@ describe('composed response helper', () => {
       >();
       return c.var.res(201, { created: true });
     });
+  });
+});
+
+describe('openApi without responses', () => {
+  it('keeps environment, validation and client inference when responses are omitted', async () => {
+    const app = new Hono<AppEnv>().post(
+      '/without-responses',
+      openApi(
+        {
+          request: {
+            json: z.object({ name: z.string() }),
+            header: z.object({ 'x-request-id': z.string() }),
+          },
+        },
+        auth,
+      ),
+      (c) => {
+        expectTypeOf(c.env.KV).toEqualTypeOf<AppBindings['KV']>();
+        expectTypeOf(c.var.userId).toEqualTypeOf<string>();
+
+        const { name } = c.req.valid('json');
+        return c.json({ name }, 200);
+      },
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['without-responses'].$post({
+      json: { name: 'John' },
+      header: { 'x-request-id': 'req-1' },
+    });
+
+    if (res.status === 200) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+    }
+    if (res.status === 401) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+    }
+
+    await client['without-responses'].$post({
+      // @ts-expect-error json input is still derived from the request schema
+      json: { name: 123 },
+      header: { 'x-request-id': 'req-1' },
+    });
+  });
+
+  it('creates a fragment without responses whose middleware sees the route environment', async () => {
+    const fragment = createOpenApiFragment<AppEnv>()(
+      { request: { json: z.object({ name: z.string() }) } },
+      async (c, next) => {
+        expectTypeOf(c.env.KV).toEqualTypeOf<AppBindings['KV']>();
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        await next();
+      },
+    );
+
+    const app = new Hono<AppEnv>().post(
+      '/fragment-without-responses',
+      openApi(
+        { responses: { 201: z.object({ created: z.boolean() }) } },
+        fragment,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        return c.var.res(201, { created: true });
+      },
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['fragment-without-responses'].$post({
+      json: { name: 'John' },
+    });
+    if (res.status === 201) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ created: boolean }>();
+    }
+  });
+
+  it('keeps later response declarations when an earlier openApi omits responses', async () => {
+    const app = new Hono<AppEnv>().post(
+      '/stacked-without-responses',
+      openApi({ request: { json: z.object({ name: z.string() }) } }, auth),
+      openApi({ responses: { 200: z.object({ name: z.string() }) } }),
+      (c) => c.var.res(200, { name: c.req.valid('json').name }),
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['stacked-without-responses'].$post({
+      json: { name: 'John' },
+    });
+    if (res.status === 200) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+    }
+    if (res.status === 401) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+    }
+  });
+
+  it('supports omitted responses across the multi-middleware overloads', async () => {
+    const app = new Hono<AppEnv>().post(
+      '/multi-without-responses',
+      openApi(
+        { request: { json: z.object({ name: z.string() }) } },
+        auth,
+        forbidden,
+        rateLimited,
+      ),
+      (c) => {
+        expectTypeOf(c.var.userId).toEqualTypeOf<string>();
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        return c.json({ name: c.req.valid('json').name }, 200);
+      },
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['multi-without-responses'].$post({
+      json: { name: 'John' },
+    });
+    if (res.status === 200) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+    }
+    if (res.status === 401) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ message: string }>();
+    }
+    if (res.status === 403) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ reason: string }>();
+    }
+    if (res.status === 429) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ retryAfter: number }>();
+    }
+  });
+
+  it('creates a fragment without responses with multiple middleware', async () => {
+    const fragment = createOpenApiFragment<AppEnv>()(
+      { request: { json: z.object({ name: z.string() }) } },
+      async (c, next) => {
+        expectTypeOf(c.env.KV).toEqualTypeOf<AppBindings['KV']>();
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        await next();
+      },
+      async (c, next) => {
+        expectTypeOf(c.var.userId).toEqualTypeOf<string>();
+        await next();
+      },
+    );
+
+    const app = new Hono<AppEnv>().post(
+      '/multi-fragment-without-responses',
+      openApi(
+        { responses: { 201: z.object({ created: z.boolean() }) } },
+        fragment,
+      ),
+      (c) => {
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        return c.var.res(201, { created: true });
+      },
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['multi-fragment-without-responses'].$post({
+      json: { name: 'John' },
+    });
+    if (res.status === 201) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ created: boolean }>();
+    }
+  });
+
+  it('preserves explicit generic arguments and required operation responses', async () => {
+    type JsonBody = {
+      json: z.ZodObject<{ name: z.ZodString }>;
+    };
+    type Created = {
+      200: z.ZodObject<{ name: z.ZodString }>;
+    };
+    type LegacyDefineOpenApiOperation = <
+      Req extends HonoOpenApiRequestSchemas,
+      Res extends HonoOpenApiResponses,
+    >(
+      operation: HonoOpenApiOperation<Req, Res>,
+    ) => HonoOpenApiOperation<Req, Res>;
+
+    // The pre-existing signature remains assignable after adding the
+    // no-responses overload.
+    const legacyDefine: LegacyDefineOpenApiOperation = defineOpenApiOperation;
+    expectTypeOf(legacyDefine).toBeFunction();
+
+    const operation: HonoOpenApiOperation<JsonBody, Created> = {
+      request: { json: z.object({ name: z.string() }) },
+      responses: { 200: z.object({ name: z.string() }) },
+    };
+    // `HonoOpenApiOperation` still requires responses; only the call sites
+    // accept the no-responses variant.
+    expectTypeOf(operation.responses).not.toBeUndefined();
+    // @ts-expect-error responses remain required on HonoOpenApiOperation
+    const missingResponses: HonoOpenApiOperation<JsonBody> = {
+      request: { json: z.object({ name: z.string() }) },
+    };
+    expectTypeOf(missingResponses).toEqualTypeOf<
+      HonoOpenApiOperation<JsonBody>
+    >();
+
+    const app = new Hono().post(
+      '/explicit-generics',
+      openApi<JsonBody, '/explicit-generics', Created>(operation),
+      (c) => c.json(c.req.valid('json'), 200),
+    );
+
+    const defined = defineOpenApiOperation<JsonBody, Created>(operation);
+    expectTypeOf(defined.responses).not.toBeUndefined();
+
+    const definedWithoutResponses = defineOpenApiOperation({
+      request: { json: z.object({ name: z.string() }) },
+    });
+    new Hono().post(
+      '/defined-without-responses',
+      openApi(definedWithoutResponses),
+      (c) => {
+        expectTypeOf(c.req.valid('json')).toEqualTypeOf<{ name: string }>();
+        return c.json(c.req.valid('json'), 200);
+      },
+    );
+
+    const client = hc<typeof app>('/');
+    const res = await client['explicit-generics'].$post({
+      json: { name: 'John' },
+    });
+    if (res.status === 200) {
+      expectTypeOf(await res.json()).toEqualTypeOf<{ name: string }>();
+    }
   });
 });

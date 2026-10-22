@@ -246,8 +246,29 @@ export interface HonoOpenApiOperation<
   Res extends HonoOpenApiResponses = HonoOpenApiResponses,
 > extends Omit<ZodOpenApiOperationObject, 'requestParams' | 'responses'> {
   request?: Req;
+  /**
+   * Response schemas, keyed by status code.
+   *
+   * `openApi()` and `defineOpenApiOperation()` accept operations without this
+   * field and default it to `{}` at runtime.
+   */
   responses: Res;
 }
+
+/**
+ * Operation accepted by `openApi()` when no response schemas are declared.
+ * `responses` is optional at the call site and normalized to `{}` at runtime.
+ */
+export type HonoOpenApiOperationWithoutResponses<
+  Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+> = Omit<HonoOpenApiOperation<Req, Record<never, never>>, 'responses'> & {
+  responses?: never;
+};
+
+type HonoOpenApiOperationInput<
+  Req extends HonoOpenApiRequestSchemas,
+  Res extends HonoOpenApiResponses,
+> = HonoOpenApiOperation<Req, Res> | HonoOpenApiOperationWithoutResponses<Req>;
 
 /**
  * zod-openapi document without `openapi` property (set to 3.1.0, we do not support lower versions).
@@ -315,9 +336,9 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
   ): OpenApiFragmentValue<
     Req,
     Res,
@@ -333,12 +354,19 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
-    FReq extends HonoOpenApiRequestSchemas,
-    FRes extends HonoOpenApiResponses,
-    E1 extends Env,
-    X1 extends HandlerResponse<unknown>,
+    Res extends HonoOpenApiResponses = Record<never, never>,
+    FReq extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses = HonoOpenApiResponses,
+    E1 extends Env = Env,
+    X1 extends HandlerResponse<unknown> = HandlerResponse<unknown>,
     M1 extends InlineCompositionMiddleware<
+      RouteEnv,
+      MergeResponseMaps<Res, FRes>,
+      P,
+      MergeRequestValues<Values<Req>, Values<FReq>>,
+      E1,
+      X1
+    > = InlineCompositionMiddleware<
       RouteEnv,
       MergeResponseMaps<Res, FRes>,
       P,
@@ -347,7 +375,7 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
       X1
     >,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
       OpenApiShapeConflict<Req, FReq, Res, FRes>,
     middleware: M1 & { [FragmentShapeSymbol]?: never },
@@ -369,11 +397,11 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
-    FReq extends HonoOpenApiRequestSchemas,
-    FRes extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
+    FReq extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    FRes extends HonoOpenApiResponses = HonoOpenApiResponses,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     fragmentMiddleware: OpenApiFragmentValue<FReq, FRes> &
       OpenApiShapeConflict<Req, FReq, Res, FRes>,
   ): OpenApiFragmentValue<
@@ -391,14 +419,24 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-    E1 extends Env,
-    X1 extends HandlerResponse<unknown>,
+    Res extends HonoOpenApiResponses = Record<never, never>,
+    F1Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses = HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses = HonoOpenApiResponses,
+    E1 extends Env = Env,
+    X1 extends HandlerResponse<unknown> = HandlerResponse<unknown>,
     M1 extends InlineCompositionMiddleware<
+      RouteEnv,
+      MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
+      P,
+      MergeRequestValues<
+        MergeRequestValues<Values<Req>, Values<F1Req>>,
+        Values<F2Req>
+      >,
+      E1,
+      X1
+    > = InlineCompositionMiddleware<
       RouteEnv,
       MergeResponseMaps<MergeResponseMaps<Res, F1Res>, F2Res>,
       P,
@@ -410,7 +448,7 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
       X1
     >,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
@@ -450,13 +488,13 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
+    F1Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses = HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses = HonoOpenApiResponses,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
@@ -488,15 +526,15 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
-    F1Req extends HonoOpenApiRequestSchemas,
-    F1Res extends HonoOpenApiResponses,
-    F2Req extends HonoOpenApiRequestSchemas,
-    F2Res extends HonoOpenApiResponses,
-    F3Req extends HonoOpenApiRequestSchemas,
-    F3Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
+    F1Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F1Res extends HonoOpenApiResponses = HonoOpenApiResponses,
+    F2Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F2Res extends HonoOpenApiResponses = HonoOpenApiResponses,
+    F3Req extends HonoOpenApiRequestSchemas = HonoOpenApiRequestSchemas,
+    F3Res extends HonoOpenApiResponses = HonoOpenApiResponses,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     fragment1: OpenApiFragmentValue<F1Req, F1Res> &
       OpenApiShapeConflict<Req, F1Req, Res, F1Res>,
     fragment2: OpenApiFragmentValue<F2Req, F2Res> &
@@ -603,9 +641,9 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
     E1 extends Env,
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
     middleware1: MiddlewareHandler<E1, P, any, X1> & {
       [FragmentShapeSymbol]?: never;
@@ -630,9 +668,9 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
     E2 extends Env,
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
     middleware1: MiddlewareHandler<E1, P, any, X1> & {
       [FragmentShapeSymbol]?: never;
@@ -664,9 +702,9 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
     E3 extends Env,
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     // oxlint-disable-next-line no-explicit-any
     middleware1: MiddlewareHandler<E1, P, any, X1> & {
       [FragmentShapeSymbol]?: never;
@@ -955,11 +993,11 @@ export interface HonoOpenApiFragmentMiddleware<
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
     M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     middleware1: M1 & { [FragmentShapeSymbol]?: never },
   ): OpenApiFragmentValue<
     Req,
@@ -975,13 +1013,13 @@ export interface HonoOpenApiFragmentMiddleware<
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
     M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
     M2 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     middleware1: M1 & { [FragmentShapeSymbol]?: never },
     middleware2: M2 & { [FragmentShapeSymbol]?: never },
   ): OpenApiFragmentValue<
@@ -1000,7 +1038,7 @@ export interface HonoOpenApiFragmentMiddleware<
   <
     Req extends HonoOpenApiRequestSchemas,
     P extends string,
-    Res extends HonoOpenApiResponses,
+    Res extends HonoOpenApiResponses = Record<never, never>,
     M1 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
     M2 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
@@ -1008,7 +1046,7 @@ export interface HonoOpenApiFragmentMiddleware<
     M3 extends FragmentMiddlewareBase<RouteEnv, Res, P, Req> =
       FragmentMiddlewareBase<RouteEnv, Res, P, Req>,
   >(
-    operation: HonoOpenApiOperation<Req, Res>,
+    operation: HonoOpenApiOperationInput<Req, Res>,
     middleware1: M1 & { [FragmentShapeSymbol]?: never },
     middleware2: M2 & { [FragmentShapeSymbol]?: never },
     middleware3: M3 & { [FragmentShapeSymbol]?: never },
