@@ -9,6 +9,7 @@ import type { HandlerResponse, IntersectNonAnyTypes } from 'hono/types';
 import type {
   FragmentShapeSymbol,
   RequestValidationSchemaSymbol,
+  ResponseSchemasSymbol,
 } from './symbols.ts';
 import type { ResponseHeader } from 'hono/utils/headers';
 import type { ContentlessStatusCode, StatusCode } from 'hono/utils/http-status';
@@ -542,6 +543,36 @@ interface HonoOpenApiCompositionMiddleware<RouteEnv extends Env | undefined> {
   >;
 }
 
+type IsAny<T> = 0 extends 1 & T ? true : false;
+
+/**
+ * Typed responses contributed by a plain middleware whose return type may also
+ * include `void`/`undefined`/untyped `Response`. Hono's client response merge
+ * requires every non-void member to be a `Response`/`TypedResponse`, so
+ * forwarding the raw return type would discard the whole middleware's
+ * responses when it also returns `undefined` (e.g. after `await next()`).
+ *
+ * The unparameterized `TypedResponse` carried by `HandlerResponse<any>` (the
+ * inferred constraint of middleware returning `void`) has the full `StatusCode`
+ * union. Passing it through would widen the route schema to every status, so
+ * only responses with a concrete status are kept.
+ */
+type MiddlewareTypedResponses<X> = X extends unknown
+  ? IsAny<X> extends true
+    ? never
+    : Exclude<X, void | undefined> extends infer T
+      ? T extends AnyTypedResponse
+        ? T extends TypedResponse<unknown, infer S, infer _F>
+          ? IsAny<S> extends true
+            ? never
+            : [StatusCode] extends [S]
+              ? never
+              : T
+          : never
+        : never
+      : never
+  : never;
+
 /**
  * The `openApi` middleware, optionally accepting reusable user middleware.
  *
@@ -586,7 +617,7 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
       IntersectNonAnyTypes<[E1, HonoOpenApiMiddlewareEnv<Res>]>,
       P,
       Values<Req>,
-      X1
+      MiddlewareTypedResponses<X1> | OperationResponseTypes<Res>
     >
   >;
 
@@ -615,7 +646,9 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
       IntersectNonAnyTypes<[E1, E2, HonoOpenApiMiddlewareEnv<Res>]>,
       P,
       Values<Req>,
-      X1 | X2
+      | MiddlewareTypedResponses<X1>
+      | MiddlewareTypedResponses<X2>
+      | OperationResponseTypes<Res>
     >
   >;
 
@@ -649,7 +682,10 @@ export interface HonoOpenApiMiddleware extends HonoOpenApiCompositionMiddleware<
       IntersectNonAnyTypes<[E1, E2, E3, HonoOpenApiMiddlewareEnv<Res>]>,
       P,
       Values<Req>,
-      X1 | X2 | X3
+      | MiddlewareTypedResponses<X1>
+      | MiddlewareTypedResponses<X2>
+      | MiddlewareTypedResponses<X3>
+      | OperationResponseTypes<Res>
     >
   >;
 }
@@ -1019,32 +1055,69 @@ export type HeaderRecord = Record<string, string | string[]> & {
 
 type InferPayload<T> = T extends null ? null : z.infer<T>;
 
-type ResWithStatus<
+/**
+ * Variables contributed by an `openApi()` fragment.
+ *
+ * `res` is declared as a method instead of a function-typed property so that
+ * its `this` type is the *whole* variables object it is called on. Hono chains
+ * middleware by intersecting their environments, so when `openApi(schema)` is
+ * followed by other fragments in the same route (e.g.
+ * `openApi(schema), jwtMiddleware, handler`) the intersected variables carry
+ * every fragment's response schemas. Reading them through `this` inside `res`
+ * yields one call signature covering all of them, which keeps status/payload
+ * IntelliSense working. A plain function property would instead intersect two
+ * independent `res` signatures, and contextual typing would only see the
+ * first one.
+ */
+export interface HonoOpenApiVariables<
   Schemas extends Partial<Record<StatusCodeWithoutMinus1, unknown>>,
-> = <S extends keyof Schemas & StatusCodeWithoutMinus1>(
-  status: S,
-  payload: InferPayload<Schemas[S]>,
-  headers?: HeaderRecord,
-) => Response & TypedResponse<InferPayload<Schemas[S]>, S>;
+> {
+  readonly [ResponseSchemasSymbol]: Schemas;
 
-type ResWithoutStatus<
-  Schemas extends Partial<Record<StatusCodeWithoutMinus1, unknown>>,
-> = Schemas extends { 200: infer T }
-  ? (
-      payload: z.infer<T>,
-      headers?: HeaderRecord,
-    ) => Response & TypedResponse<z.infer<T>, 200, 'json'>
-  : // oxlint-disable-next-line typescript/no-empty-object-type
-    {};
+  res<
+    S extends keyof this[typeof ResponseSchemasSymbol] &
+      StatusCodeWithoutMinus1,
+  >(
+    status: S,
+    payload: InferPayload<this[typeof ResponseSchemasSymbol][S]>,
+    headers?: HeaderRecord,
+  ): Response &
+    TypedResponse<InferPayload<this[typeof ResponseSchemasSymbol][S]>, S>;
+
+  res(
+    payload: this[typeof ResponseSchemasSymbol] extends { 200: infer T }
+      ? InferPayload<T>
+      : never,
+    headers?: HeaderRecord,
+  ): this[typeof ResponseSchemasSymbol] extends { 200: infer T }
+    ? Response & TypedResponse<InferPayload<T>, 200, 'json'>
+    : never;
+
+  // Per-fragment fallbacks. Sibling declarations of the same status have their
+  // schemas intersected by the polymorphic signature above; when the two
+  // declarations use distinct schema identities (e.g. two `z.literal` types)
+  // that intersection has no payload. These signatures keep each fragment's
+  // own declaration callable, matching the previous intersection behavior.
+  res<S extends keyof Schemas & StatusCodeWithoutMinus1>(
+    status: S,
+    payload: InferPayload<Schemas[S]>,
+    headers?: HeaderRecord,
+  ): Response & TypedResponse<InferPayload<Schemas[S]>, S>;
+
+  res(
+    payload: Schemas extends { 200: infer T } ? InferPayload<T> : never,
+    headers?: HeaderRecord,
+  ): Schemas extends { 200: infer T }
+    ? Response & TypedResponse<InferPayload<T>, 200, 'json'>
+    : never;
+}
 
 export type HonoOpenApiMiddlewareEnv<
   Res extends HonoOpenApiResponses,
   Schemas extends Partial<Record<StatusCodeWithoutMinus1, unknown>> =
     ResponseSchemas<Res>,
 > = {
-  Variables: {
-    res: ResWithStatus<Schemas> & ResWithoutStatus<Schemas>;
-  };
+  Variables: HonoOpenApiVariables<Schemas>;
 };
 
 export type ResponseSchema = {

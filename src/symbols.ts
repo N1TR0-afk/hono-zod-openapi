@@ -17,3 +17,11 @@ export const FragmentMiddlewareSymbol: unique symbol = Symbol();
 
 /** Runtime-only schema when docs merge also includes validate:false fields. */
 export const RequestValidationSchemaSymbol: unique symbol = Symbol();
+
+/**
+ * Type-level contract of the `c.var.res` helper: the response schemas declared
+ * by a fragment. It is carried on the environment's variables so that Hono's
+ * `Variables` intersection combines the schemas of every middleware on the
+ * route, which the polymorphic `this` of `res` then reads.
+ */
+export const ResponseSchemasSymbol: unique symbol = Symbol();
