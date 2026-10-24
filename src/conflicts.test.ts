@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import * as z from 'zod';
-import { detectOpenApiRuntimeConflicts } from './conflicts.ts';
+import {
+  detectOpenApiRuntimeConflicts,
+  describeRuntimeConflict,
+} from './conflicts.ts';
 import type { HonoOpenApiOperation } from './types.ts';
 
 describe('detectOpenApiRuntimeConflicts', () => {
@@ -220,5 +223,264 @@ describe('detectOpenApiRuntimeConflicts', () => {
         key: 'header.authorization',
       });
     });
+
+    it('rejects a non-object target with different validation rules', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: { header: z.string().min(1) },
+          responses: {},
+        },
+        {
+          request: { header: z.string().max(10) },
+          responses: {},
+        },
+      );
+
+      expect(conflicts).toContainEqual({ kind: 'request', key: 'header' });
+    });
+
+    it('does not compare schemas whose output is not concrete', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: { header: z.any(), query: z.unknown(), json: z.never() },
+          responses: {},
+        },
+        {
+          request: {
+            header: z.string(),
+            query: z.object({ id: z.string() }),
+            json: z.object({ name: z.string() }),
+          },
+          responses: {},
+        },
+      );
+
+      expect(conflicts).toEqual([]);
+    });
+
+    it('skips documentation-only targets when comparing validation rules', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: {
+            header: {
+              schema: z.object({ authorization: z.string() }),
+              validate: false,
+            },
+          },
+          responses: {},
+        },
+        {
+          request: { header: z.object({ authorization: z.number() }) },
+          responses: {},
+        },
+      );
+
+      expect(conflicts).toEqual([]);
+    });
+
+    it('ignores property declaration order', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: {
+            header: z.object({
+              authorization: z.string(),
+              'x-request-id': z.string(),
+            }),
+          },
+          responses: {},
+        },
+        {
+          request: {
+            header: z.object({
+              'x-request-id': z.string(),
+              authorization: z.string(),
+            }),
+          },
+          responses: {},
+        },
+      );
+
+      expect(conflicts).toEqual([]);
+    });
+
+    it('ignores enum member order and compares union schemas', () => {
+      expect(
+        detectOpenApiRuntimeConflicts(
+          {
+            request: {
+              query: z.object({ status: z.enum(['active', 'inactive']) }),
+            },
+            responses: {},
+          },
+          {
+            request: {
+              query: z.object({ status: z.enum(['inactive', 'active']) }),
+            },
+            responses: {},
+          },
+        ),
+      ).toEqual([]);
+
+      expect(
+        detectOpenApiRuntimeConflicts(
+          {
+            request: {
+              query: z.object({ value: z.union([z.string(), z.number()]) }),
+            },
+            responses: {},
+          },
+          {
+            request: {
+              query: z.object({ value: z.union([z.string(), z.number()]) }),
+            },
+            responses: {},
+          },
+        ),
+      ).toEqual([]);
+    });
+
+    it('compares target objects declared with the validation wrapper', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          request: {
+            header: {
+              schema: z.object({ authorization: z.string() }),
+              validate: true,
+            },
+          },
+          responses: {},
+        },
+        {
+          request: {
+            header: {
+              schema: z.object({ authorization: z.number() }),
+              validate: true,
+            },
+          },
+          responses: {},
+        },
+      );
+
+      expect(conflicts).toContainEqual({
+        kind: 'request',
+        key: 'header.authorization',
+      });
+    });
+
+    it('compares multi-content responses as a set of schemas', () => {
+      const first: HonoOpenApiOperation = {
+        responses: {
+          200: {
+            description: 'ok',
+            content: {
+              'application/json': {
+                schema: z.object({ value: z.string() }),
+              },
+              'text/plain': { schema: z.string() },
+            },
+          },
+        },
+      };
+      const sameContent: HonoOpenApiOperation = {
+        responses: {
+          200: {
+            description: 'ok',
+            content: {
+              'text/plain': { schema: z.string() },
+              'application/json': {
+                schema: z.object({ value: z.string() }),
+              },
+            },
+          },
+        },
+      };
+      const fewerContentTypes: HonoOpenApiOperation = {
+        responses: {
+          200: {
+            description: 'ok',
+            content: {
+              'application/json': {
+                schema: z.object({ value: z.string() }),
+              },
+            },
+          },
+        },
+      };
+
+      expect(detectOpenApiRuntimeConflicts(first, sameContent)).toEqual([]);
+      expect(
+        detectOpenApiRuntimeConflicts(first, fewerContentTypes),
+      ).toContainEqual({ kind: 'responses', key: '200' });
+    });
+
+    it('rejects responses whose content has no Zod schema', () => {
+      const conflicts = detectOpenApiRuntimeConflicts(
+        {
+          responses: {
+            200: {
+              description: 'ok',
+              content: {
+                'application/json': { schema: { type: 'string' } },
+              },
+            },
+          } as HonoOpenApiOperation['responses'],
+        },
+        {
+          responses: {
+            200: {
+              description: 'ok',
+              content: {
+                'application/json': { schema: z.string() },
+              },
+            },
+          },
+        },
+      );
+
+      expect(conflicts).toContainEqual({ kind: 'responses', key: '200' });
+    });
+
+    it('rejects different references and a reference-vs-schema redeclaration', () => {
+      expect(
+        detectOpenApiRuntimeConflicts(
+          {
+            responses: {
+              401: { $ref: '#/components/responses/Unauthorized' },
+            },
+          },
+          {
+            responses: {
+              401: { $ref: '#/components/responses/Forbidden' },
+            },
+          },
+        ),
+      ).toContainEqual({ kind: 'responses', key: '401' });
+
+      expect(
+        detectOpenApiRuntimeConflicts(
+          {
+            responses: {
+              401: { $ref: '#/components/responses/Unauthorized' },
+            },
+          },
+          {
+            responses: {
+              401: z.object({ message: z.string() }),
+            },
+          },
+        ),
+      ).toContainEqual({ kind: 'responses', key: '401' });
+    });
+  });
+});
+
+describe('describeRuntimeConflict', () => {
+  it('describes request and response conflicts', () => {
+    expect(
+      describeRuntimeConflict({ kind: 'request', key: 'header.authorization' }),
+    ).toBe("request property 'header.authorization' has a different schema");
+    expect(describeRuntimeConflict({ kind: 'responses', key: '401' })).toBe(
+      "response status '401' has a different schema",
+    );
   });
 });

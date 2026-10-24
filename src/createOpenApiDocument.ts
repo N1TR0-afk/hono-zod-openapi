@@ -102,6 +102,20 @@ export function createOpenApiDocument<
     Array<{ path: string; operation: HonoOpenApiOperation }>
   >();
 
+  // Keep unprocessed operations so sibling slots merge as `openApi` operations
+  // (request schemas included) before document-specific normalization. Merging
+  // already-processed operations would lose earlier request targets because
+  // they only carry `requestParams`/`requestBody`, not `request`.
+  const operationsByRoute = new Map<
+    string,
+    {
+      method: Method;
+      path: string;
+      pathWithMethod: string;
+      operation: HonoOpenApiOperation;
+    }
+  >();
+
   for (const route of router.routes) {
     const handler =
       COMPOSED_HANDLER in route.handler
@@ -112,35 +126,35 @@ export function createOpenApiDocument<
       continue;
     }
 
-    const { request, responses, ...rest } = handler[
-      OpenApiSymbol
-    ] as HonoOpenApiOperation;
+    const rawOperation = handler[OpenApiSymbol] as HonoOpenApiOperation;
+    const { request, responses, ...rest } = rawOperation;
+
+    if (hasWildcardSegment(route.path)) {
+      throw new Error(
+        `Cannot document wildcard route "${route.method} ${route.path}": ` +
+          'OpenAPI paths do not support "*" segments. Use a concrete path or add the operation to the document manually.',
+      );
+    }
 
     const path = normalizePathParams(route.path);
     const pathWithMethod = `${route.method} ${path}`;
-    const routeKey = `${route.method} ${route.path}`;
+    const method = route.method.toLowerCase() as Method;
+    const routeKey = `${route.method} ${path}`;
 
     const shapes = shapesByRoute.get(routeKey) ?? [];
     shapes.push({ path, operation: { request, responses, ...rest } });
     shapesByRoute.set(routeKey, shapes);
 
-    const operation: ZodOpenApiOperationObject = {
-      responses: processResponses(responses, pathWithMethod),
-      ...(request ? processRequest(request) : {}),
-      ...rest,
-    };
-
-    if (!(path in paths)) {
-      paths[path] = {};
-    }
-
-    const method = route.method.toLowerCase() as Method;
-    // stacked `openApi()` fragments of the same route merge (the later
-    // fragment wins on conflicting doc keys)
-    const existingOperation = paths[path][method];
-    paths[path][method] = existingOperation
-      ? (mergeOperations(existingOperation, operation) as typeof operation)
-      : operation;
+    const operationKey = `${method} ${path}`;
+    const previous = operationsByRoute.get(operationKey);
+    operationsByRoute.set(operationKey, {
+      method,
+      path,
+      pathWithMethod,
+      operation: previous
+        ? mergeOperations(previous.operation, rawOperation)
+        : rawOperation,
+    });
   }
 
   for (const [routeKey, shapes] of shapesByRoute) {
@@ -160,6 +174,28 @@ export function createOpenApiDocument<
         }
       }
     }
+  }
+
+  for (const {
+    method,
+    path,
+    pathWithMethod,
+    operation,
+  } of operationsByRoute.values()) {
+    const { request, responses, ...rest } = operation;
+    const openApiOperation: ZodOpenApiOperationObject = {
+      responses: processResponses(responses, pathWithMethod),
+      ...(request ? processRequest(request) : {}),
+      ...rest,
+    };
+
+    if (!(path in paths)) {
+      paths[path] = {};
+    }
+
+    // stacked `openApi()` fragments of the same route merge (the later
+    // fragment wins on conflicting doc keys)
+    paths[path][method] = openApiOperation;
   }
 
   const openApiDoc = createDocument({
@@ -228,3 +264,11 @@ export const processResponses = (
 export const normalizePathParams = (path: string): string => {
   return path.replace(/:([a-zA-Z0-9-_]+)\??(\{.*?\})?/g, '{$1}');
 };
+
+/**
+ * Hono uses a standalone `*` segment for catch-all routes. OpenAPI has no
+ * equivalent path template, so such routes cannot be documented faithfully.
+ * Stars inside a parameter matcher (e.g. `:id{[0-9]*}`) are not wildcards.
+ */
+export const hasWildcardSegment = (path: string): boolean =>
+  /(^|\/)\*(?:\/|$)/.test(path);

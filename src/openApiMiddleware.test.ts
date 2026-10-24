@@ -1055,6 +1055,21 @@ describe('openApi fragment merging', () => {
       headers: { authorization: 'Bearer token' },
     });
     expect(response.status).toBe(200);
+
+    const missingAuth = await app.request('/me');
+    expect(missingAuth.status).toBe(400);
+
+    const operation = createOpenApiDocument(
+      app,
+      { info: { title: 'Test', version: '1.0.0' } },
+      { addRoute: false },
+    ).paths?.['/me']?.get;
+
+    expect(
+      (operation?.parameters ?? []).map((parameter) =>
+        'name' in parameter ? parameter.name : undefined,
+      ),
+    ).toEqual(expect.arrayContaining(['authorization', 'x-document-only']));
   });
 
   it('composed fragment: the route\u0027s op status stays callable from the handler (c.var.res is not overwritten by the fragment\u0027s inner res)', async () => {
@@ -1195,6 +1210,194 @@ describe('openApi fragment merging', () => {
   });
 });
 
+describe('separate openApi chain slots', () => {
+  it('validates and runs each slot once, and exposes cross-slot input to the handler', async () => {
+    const order: string[] = [];
+    const headerSlot = openApi(
+      {
+        request: {
+          header: z.object({ authorization: z.string().optional() }),
+        },
+        responses: {
+          200: z.object({ name: z.string() }),
+          401: z.object({ message: z.string() }),
+        },
+      },
+      async (c, next) => {
+        order.push('header-before');
+        if (c.req.header('authorization') !== 'Bearer token') {
+          return c.json({ message: 'Unauthorized' }, 401);
+        }
+        await next();
+        order.push('header-after');
+      },
+    );
+    const bodySlot = openApi(
+      {
+        request: { json: z.object({ name: z.string() }) },
+      },
+      async (_c, next) => {
+        order.push('body-before');
+        await next();
+        order.push('body-after');
+      },
+    );
+
+    const app = new Hono().post('/tasks', headerSlot, bodySlot, (c) => {
+      order.push('handler');
+      return c.var.res(200, { name: c.req.valid('json').name });
+    });
+
+    const ok = await app.request('/tasks', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'John' }),
+    });
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ name: 'John' });
+    expect(order).toEqual([
+      'header-before',
+      'body-before',
+      'handler',
+      'body-after',
+      'header-after',
+    ]);
+
+    order.length = 0;
+    const unauthorized = await app.request('/tasks', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 123 }),
+    });
+    // The earlier slot returns before the later slot's validator runs.
+    expect(unauthorized.status).toBe(401);
+    expect(order).toEqual(['header-before']);
+
+    order.length = 0;
+    const invalidBody = await app.request('/tasks', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ name: 123 }),
+    });
+    expect(invalidBody.status).toBe(400);
+    // The later slot's validation happens after the earlier slot's
+    // pre-next middleware, but before its own middleware and the handler.
+    expect(order).toEqual(['header-before', 'header-after']);
+  });
+
+  it('can use a status declared by another slot through c.var.res', async () => {
+    const okSlot = openApi({
+      responses: { 200: z.object({ ok: z.boolean() }) },
+    });
+    const errorSlot = openApi({
+      responses: { 401: z.object({ message: z.string() }) },
+    });
+
+    const app = new Hono().get('/user', okSlot, errorSlot, (c) =>
+      c.var.res(401, { message: 'Unauthorized' }),
+    );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ message: 'Unauthorized' });
+  });
+
+  it('runs the same fragment once per chain slot when passed twice', async () => {
+    let runs = 0;
+    const fragment = openApi(
+      {
+        request: { header: z.object({}) },
+      },
+      async (_c, next) => {
+        runs += 1;
+        await next();
+      },
+    );
+
+    const app = new Hono().get('/user', fragment, fragment, (c) =>
+      c.json({ ok: true }, 200),
+    );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(200);
+    expect(runs).toBe(2);
+  });
+
+  it('rejects a nested conflict that only exists at runtime', () => {
+    const fragment = openApi({
+      request: { header: z.object({ id: z.string().min(1) }) },
+    });
+
+    expect(() =>
+      openApi(
+        {
+          request: { header: z.object({ id: z.string().max(10) }) },
+        },
+        fragment,
+      ),
+    ).toThrow(/header\.id/);
+  });
+});
+
+describe('middleware return handling', () => {
+  it('stops on an early plain Response from an async middleware', async () => {
+    let handlerRuns = 0;
+    const app = new Hono().get(
+      '/user',
+      openApi(
+        { responses: { 200: z.object({ ok: z.boolean() }) } },
+        async () => new Response('blocked', { status: 418 }),
+      ),
+      (c) => {
+        handlerRuns += 1;
+        return c.json({ ok: true }, 200);
+      },
+    );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(418);
+    expect(await response.text()).toBe('blocked');
+    expect(handlerRuns).toBe(0);
+  });
+
+  it('lets Hono onError handle a middleware exception', async () => {
+    const app = new Hono()
+      .onError((error, c) => c.json({ handled: error.message }, 500))
+      .get(
+        '/user',
+        openApi({ responses: {} }, async () => {
+          throw new Error('boom');
+        }),
+        (c) => c.json({ ok: true }, 200),
+      );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ handled: 'boom' });
+  });
+
+  it('can set a response header after next()', async () => {
+    const app = new Hono().get(
+      '/user',
+      openApi({ responses: {} }, async (c, next) => {
+        await next();
+        c.header('x-after-next', 'yes');
+      }),
+      (c) => c.json({ ok: true }, 200),
+    );
+
+    const response = await app.request('/user');
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-after-next')).toBe('yes');
+  });
+});
+
 describe('openApi without responses', () => {
   it('validates input and runs reusable middleware when responses are omitted', async () => {
     let middlewareRuns = 0;
@@ -1279,6 +1482,15 @@ describe('openApi without responses', () => {
     );
     expect(unauthorized.status).toBe(401);
     expect(middlewareRuns).toBe(0);
+
+    // Middleware TypedResponse schemas reach the RPC client, but the document
+    // only contains responses explicitly declared by the operation.
+    const document = createOpenApiDocument(
+      app,
+      { info: { title: 'Test', version: '1.0.0' } },
+      { addRoute: false },
+    );
+    expect(document.paths?.['/user']?.post?.responses).toEqual({});
   });
 
   it('generates the same document as an explicit empty response map', () => {
