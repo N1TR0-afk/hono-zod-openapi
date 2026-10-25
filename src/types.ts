@@ -268,7 +268,15 @@ export type HonoOpenApiOperationWithoutResponses<
 type HonoOpenApiOperationInput<
   Req extends HonoOpenApiRequestSchemas,
   Res extends HonoOpenApiResponses,
-> = HonoOpenApiOperation<Req, Res> | HonoOpenApiOperationWithoutResponses<Req>;
+> =
+  | (Omit<HonoOpenApiOperation<Req, Res>, 'responses'> & {
+      // Keep the contextual type broad enough for status-code completions.
+      // `Res` can default to `Record<never, never>` when `responses` is
+      // omitted; typing the property as bare `Res` would make that an empty
+      // object and hide every status key from IntelliSense.
+      responses: Res & HonoOpenApiResponses;
+    })
+  | HonoOpenApiOperationWithoutResponses<Req>;
 
 /**
  * zod-openapi document without `openapi` property (set to 3.1.0, we do not support lower versions).
@@ -802,6 +810,13 @@ export type SchemaOfTargetInternal<T> = SchemaOfTarget<T>;
 export type ConcreteSchemaOutInternal<T extends AnyZodSchema> =
   ConcreteSchemaOut<T>;
 export type EqualInternal<A, B> = Equal<A, B>;
+export type OperationInputResponsesInternal<
+  Req extends HonoOpenApiRequestSchemas,
+  Res extends HonoOpenApiResponses,
+> = Extract<
+  HonoOpenApiOperationInput<Req, Res>,
+  { responses: unknown }
+>['responses'];
 
 // schemas whose validated output is not a concrete shape (e.g. the bare
 // `z.ZodType` used by blank request records, `z.any()`) cannot be conflicting
